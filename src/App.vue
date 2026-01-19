@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, type Ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, type Ref } from "vue";
 import {
   createYouTubePlayer,
   extractVideoId,
@@ -9,10 +9,13 @@ import {
 import { startCamera, stopCamera } from "./services/camera.ts";
 import {
   loadHistory,
+  loadPlaylists,
   loadState,
   saveHistory,
+  savePlaylists,
   saveState,
-  type HistoryItem
+  type HistoryItem,
+  type Playlist
 } from "./services/storage.ts";
 
 type LayoutOption = "split" | "splitReverse" | "videoOnly" | "cameraOnly";
@@ -27,6 +30,14 @@ type AppState = {
 
 type SaveOptions = {
   skipSave?: boolean;
+};
+
+type PanelTab = "history" | "playlists";
+
+type DragState = {
+  id: string;
+  fromIndex: number;
+  overIndex: number;
 };
 
 const DEFAULT_STATE: AppState = {
@@ -60,6 +71,13 @@ const historyItems = ref<HistoryItem[]>(
   }))
 );
 const historyOpen = ref(false);
+const panelTab = ref<PanelTab>("history");
+
+const playlistState = loadPlaylists();
+const playlists = ref<Playlist[]>(playlistState.playlists);
+const activePlaylistId = ref<string | null>(
+  playlistState.activePlaylistId ?? (playlistState.playlists[0]?.id ?? null)
+);
 
 const DEFAULT_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 const rateOptions = ref<number[]>([...DEFAULT_RATES]);
@@ -67,7 +85,20 @@ const SEEK_HOLD_MS = 1200;
 const SEEK_EPSILON = 0.8;
 const HISTORY_SYNC_MS = 2000;
 
+const historyMap = computed(() => {
+  const map = new Map<string, HistoryItem>();
+  historyItems.value.forEach((item) => map.set(item.id, item));
+  return map;
+});
+
+const activePlaylist = computed(() =>
+  playlists.value.find((playlist) => playlist.id === activePlaylistId.value) ?? null
+);
+const playlistItems = computed(() => activePlaylist.value?.items ?? []);
+const canAddCurrent = computed(() => Boolean(activePlaylist.value) && Boolean(getActiveVideoId()));
+
 const cameraVideo = ref<HTMLVideoElement | null>(null);
+const dragState = ref<DragState | null>(null);
 
 let player: YouTubePlayer | null = null;
 let playerReady = false;
@@ -78,6 +109,7 @@ let cameraStream: MediaStream | null = null;
 let pendingSeekTo: number | null = null;
 let pendingSeekAt = 0;
 let lastHistorySyncAt = 0;
+let dragHandleEl: HTMLElement | null = null;
 
 function setStatus(target: Ref<string>, message = "") {
   target.value = message;
@@ -108,6 +140,22 @@ function formatDate(timestamp: number) {
 
 function makeThumbnailUrl(videoId: string) {
   return `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+}
+
+function getHistoryItem(videoId: string) {
+  return historyMap.value.get(videoId);
+}
+
+function getVideoTitle(videoId: string) {
+  return getHistoryItem(videoId)?.title || videoId;
+}
+
+function getVideoThumbnail(videoId: string) {
+  return getHistoryItem(videoId)?.thumbnailUrl || makeThumbnailUrl(videoId);
+}
+
+function getVideoPosition(videoId: string) {
+  return getHistoryItem(videoId)?.lastPositionSec ?? 0;
 }
 
 function commitHistory(items: HistoryItem[]) {
@@ -188,6 +236,179 @@ function syncHistoryMetadata(videoId: string) {
     durationSec,
     thumbnailUrl: makeThumbnailUrl(videoId)
   });
+}
+
+function createPlaylistId() {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `pl-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function commitPlaylists(nextPlaylists: Playlist[], nextActiveId = activePlaylistId.value) {
+  const activeId = nextActiveId ?? null;
+  playlists.value = nextPlaylists;
+  activePlaylistId.value = activeId;
+  savePlaylists({ playlists: nextPlaylists, activePlaylistId: activeId });
+}
+
+function setActivePlaylist(playlistId: string) {
+  if (playlistId === activePlaylistId.value) return;
+  commitPlaylists(playlists.value, playlistId);
+}
+
+function createPlaylist() {
+  const index = playlists.value.length + 1;
+  const now = Date.now();
+  const playlist: Playlist = {
+    id: createPlaylistId(),
+    name: `Playlist ${index}`,
+    createdAt: now,
+    updatedAt: now,
+    items: []
+  };
+  commitPlaylists([playlist, ...playlists.value], playlist.id);
+  panelTab.value = "playlists";
+}
+
+function renamePlaylist(playlist: Playlist) {
+  const name = window.prompt("Playlist name", playlist.name);
+  if (!name) return;
+  const trimmed = name.trim();
+  if (!trimmed) return;
+
+  const next = playlists.value.map((item) =>
+    item.id === playlist.id ? { ...item, name: trimmed, updatedAt: Date.now() } : item
+  );
+  commitPlaylists(next);
+}
+
+function deletePlaylist(playlistId: string) {
+  const target = playlists.value.find((item) => item.id === playlistId);
+  if (!target) return;
+  const ok = window.confirm(`Delete playlist \"${target.name}\"?`);
+  if (!ok) return;
+
+  const next = playlists.value.filter((item) => item.id !== playlistId);
+  const nextActive = next[0]?.id ?? null;
+  commitPlaylists(next, nextActive);
+}
+
+function updatePlaylistItems(playlistId: string, items: string[]) {
+  const next = playlists.value.map((playlist) =>
+    playlist.id === playlistId ? { ...playlist, items, updatedAt: Date.now() } : playlist
+  );
+  commitPlaylists(next);
+}
+
+function addCurrentToPlaylist() {
+  const playlist = activePlaylist.value;
+  if (!playlist) return;
+  const activeId = getActiveVideoId();
+  if (!activeId) return;
+
+  if (playlist.items.includes(activeId)) return;
+  const nextItems = [...playlist.items, activeId];
+  updatePlaylistItems(playlist.id, nextItems);
+  touchHistory(activeId);
+  syncHistoryMetadata(activeId);
+}
+
+function canAddVideoToPlaylist(videoId: string) {
+  const playlist = activePlaylist.value;
+  if (!playlist) return false;
+  return !playlist.items.includes(videoId);
+}
+
+function getAddVideoTitle(videoId: string) {
+  const playlist = activePlaylist.value;
+  if (!playlist) return "Create playlist first";
+  if (playlist.items.includes(videoId)) return "Already in playlist";
+  return "Add to playlist";
+}
+
+function addVideoToPlaylist(videoId: string) {
+  const playlist = activePlaylist.value;
+  if (!playlist) return;
+  if (playlist.items.includes(videoId)) return;
+  const nextItems = [...playlist.items, videoId];
+  updatePlaylistItems(playlist.id, nextItems);
+  touchHistory(videoId);
+  syncHistoryMetadata(videoId);
+}
+
+function removePlaylistItem(index: number) {
+  const playlist = activePlaylist.value;
+  if (!playlist) return;
+  const nextItems = playlist.items.filter((_, idx) => idx !== index);
+  updatePlaylistItems(playlist.id, nextItems);
+}
+
+function playFromVideoId(videoId: string) {
+  const inputValue = `https://youtu.be/${videoId}`;
+  ytUrl.value = inputValue;
+  handleLoad();
+  closeHistory();
+}
+
+function playFromPlaylist(videoId: string) {
+  playFromVideoId(videoId);
+}
+
+function startDrag(event: PointerEvent, index: number) {
+  const playlist = activePlaylist.value;
+  if (!playlist) return;
+  if (index < 0 || index >= playlist.items.length) return;
+
+  event.preventDefault();
+  dragHandleEl = event.currentTarget as HTMLElement;
+  dragHandleEl.setPointerCapture(event.pointerId);
+  dragState.value = {
+    id: playlist.items[index],
+    fromIndex: index,
+    overIndex: index
+  };
+  window.addEventListener("pointermove", handleDragMove);
+  window.addEventListener("pointerup", handleDragEnd);
+}
+
+function handleDragMove(event: PointerEvent) {
+  if (!dragState.value) return;
+  const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
+  const row = element?.closest(".playlist-row-item") as HTMLElement | null;
+  if (!row) return;
+  const index = Number(row.dataset.index);
+  if (!Number.isFinite(index)) return;
+  if (index === dragState.value.overIndex) return;
+
+  dragState.value = { ...dragState.value, overIndex: index };
+}
+
+function handleDragEnd(event: PointerEvent) {
+  if (!dragState.value) return;
+  window.removeEventListener("pointermove", handleDragMove);
+  window.removeEventListener("pointerup", handleDragEnd);
+
+  if (dragHandleEl) {
+    try {
+      dragHandleEl.releasePointerCapture(event.pointerId);
+    } catch {
+      // Ignore release errors.
+    }
+    dragHandleEl = null;
+  }
+
+  const { fromIndex, overIndex } = dragState.value;
+  dragState.value = null;
+
+  const playlist = activePlaylist.value;
+  if (!playlist) return;
+  if (fromIndex === overIndex) return;
+
+  const nextItems = [...playlist.items];
+  const [moved] = nextItems.splice(fromIndex, 1);
+  nextItems.splice(overIndex, 0, moved);
+  updatePlaylistItems(playlist.id, nextItems);
 }
 
 function getActiveVideoId() {
@@ -335,10 +556,7 @@ function handleKeydown(event: KeyboardEvent) {
 }
 
 function handleHistorySelect(item: HistoryItem) {
-  const inputValue = `https://youtu.be/${item.id}`;
-  ytUrl.value = inputValue;
-  handleLoad();
-  closeHistory();
+  playFromVideoId(item.id);
 }
 
 function removeHistoryItem(id: string) {
@@ -447,6 +665,8 @@ onBeforeUnmount(() => {
   if (timeTimer) clearInterval(timeTimer);
   stopCamera(cameraStream);
   window.removeEventListener("keydown", handleKeydown);
+  window.removeEventListener("pointermove", handleDragMove);
+  window.removeEventListener("pointerup", handleDragEnd);
 });
 </script>
 
@@ -580,13 +800,33 @@ onBeforeUnmount(() => {
     <div class="history-overlay" :class="{ 'is-open': historyOpen }" @click="closeHistory">
       <aside id="history-panel" class="history-panel" @click.stop>
         <div class="panel-header">
-          <span>History</span>
+          <span>{{ panelTab === "history" ? "History" : "Playlists" }}</span>
           <button class="btn subtle" type="button" @click="closeHistory" aria-label="Close history panel">
             Close
           </button>
         </div>
-        <div v-if="!historyItems.length" class="empty-state">No history yet.</div>
-        <ul v-else class="history-list">
+        <div class="panel-tabs">
+          <button
+            class="panel-tab"
+            type="button"
+            :class="{ 'is-active': panelTab === 'history' }"
+            @click="panelTab = 'history'"
+          >
+            History
+          </button>
+          <button
+            class="panel-tab"
+            type="button"
+            :class="{ 'is-active': panelTab === 'playlists' }"
+            @click="panelTab = 'playlists'"
+          >
+            Playlists
+          </button>
+        </div>
+
+        <div v-if="panelTab === 'history'" class="history-view">
+          <div v-if="!historyItems.length" class="empty-state">No history yet.</div>
+          <ul v-else class="history-list">
           <li v-for="item in historyItems" :key="item.id" class="history-item">
             <button class="history-card" type="button" @click="handleHistorySelect(item)">
               <img class="history-thumb" :src="item.thumbnailUrl" :alt="item.title || 'YouTube thumbnail'" />
@@ -597,31 +837,109 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </button>
+            <button
+              class="btn icon add"
+              type="button"
+              @click="addVideoToPlaylist(item.id)"
+              :disabled="!canAddVideoToPlaylist(item.id)"
+              :aria-label="getAddVideoTitle(item.id)"
+              :title="getAddVideoTitle(item.id)"
+            >
+              +
+            </button>
             <button class="btn icon" type="button" @click="removeHistoryItem(item.id)" aria-label="Remove">
               x
             </button>
           </li>
-        </ul>
-        <div class="history-footer">
-          <button
-            class="btn icon trash"
-            type="button"
-            @click="clearHistory"
-            :disabled="!historyItems.length"
-            aria-label="Clear history"
-            title="Clear history"
-          >
-            <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M4 7h16M9 7V5h6v2m-8 0v12c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V7"
-                fill="none"
-                stroke="currentColor"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="1.6"
-              />
-            </svg>
-          </button>
+          </ul>
+          <div class="history-footer">
+            <button
+              class="btn icon trash"
+              type="button"
+              @click="clearHistory"
+              :disabled="!historyItems.length"
+              aria-label="Clear history"
+              title="Clear history"
+            >
+              <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  d="M4 7h16M9 7V5h6v2m-8 0v12c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V7"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  stroke-width="1.6"
+                />
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        <div v-else class="playlist-view">
+          <div class="playlist-header">
+            <span>Playlists</span>
+            <button class="btn subtle" type="button" @click="createPlaylist">New</button>
+          </div>
+
+          <div v-if="!playlists.length" class="empty-state">No playlists yet.</div>
+          <div v-else class="playlist-list">
+            <div
+              v-for="playlist in playlists"
+              :key="playlist.id"
+              class="playlist-entry"
+              :class="{ 'is-active': playlist.id === activePlaylistId }"
+            >
+              <button class="playlist-select" type="button" @click="setActivePlaylist(playlist.id)">
+                {{ playlist.name }}
+              </button>
+              <div class="playlist-entry-actions">
+                <button class="btn icon" type="button" @click="renamePlaylist(playlist)" aria-label="Rename playlist">
+                  R
+                </button>
+                <button class="btn icon" type="button" @click="deletePlaylist(playlist.id)" aria-label="Delete playlist">
+                  x
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="activePlaylist" class="playlist-detail">
+            <div class="playlist-detail-header">
+              <div class="playlist-detail-title">{{ activePlaylist.name }}</div>
+              <button class="btn subtle" type="button" @click="addCurrentToPlaylist" :disabled="!canAddCurrent">
+                Add current
+              </button>
+            </div>
+            <div v-if="!playlistItems.length" class="empty-state">No videos yet.</div>
+            <ul v-else class="playlist-items">
+              <li
+                v-for="(videoId, index) in playlistItems"
+                :key="`${activePlaylist.id}-${videoId}-${index}`"
+                class="playlist-row-item"
+                :class="{ 'is-over': dragState && dragState.overIndex === index }"
+                :data-index="index"
+              >
+                <button
+                  class="drag-handle"
+                  type="button"
+                  @pointerdown="startDrag($event, index)"
+                  aria-label="Reorder"
+                >
+                  |||
+                </button>
+                <button class="playlist-card" type="button" @click="playFromPlaylist(videoId)">
+                  <img class="playlist-thumb" :src="getVideoThumbnail(videoId)" :alt="getVideoTitle(videoId)" />
+                  <div class="history-meta">
+                    <div class="history-title">{{ getVideoTitle(videoId) }}</div>
+                    <div class="history-sub">{{ formatTime(getVideoPosition(videoId)) }}</div>
+                  </div>
+                </button>
+                <button class="btn icon" type="button" @click="removePlaylistItem(index)" aria-label="Remove">
+                  x
+                </button>
+              </li>
+            </ul>
+          </div>
         </div>
       </aside>
     </div>
