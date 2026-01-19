@@ -1,5 +1,7 @@
 ﻿type YouTubePlayerState = {
   PLAYING: number;
+  PAUSED: number;
+  ENDED: number;
 };
 
 export type YouTubePlayer = {
@@ -12,7 +14,7 @@ export type YouTubePlayer = {
   seekTo: (seconds: number, allowSeekAhead?: boolean) => void;
   setPlaybackRate: (rate: number) => void;
   getPlayerState: () => number;
-  getVideoData: () => { video_id?: string };
+  getVideoData: () => { video_id?: string; title?: string; author?: string };
 };
 
 export type YouTubePlayerEvent = {

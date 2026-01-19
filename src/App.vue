@@ -7,7 +7,13 @@ import {
   type YouTubePlayerEvent
 } from "./services/youtube.ts";
 import { startCamera, stopCamera } from "./services/camera.ts";
-import { loadState, saveState } from "./services/storage.ts";
+import {
+  loadHistory,
+  loadState,
+  saveHistory,
+  saveState,
+  type HistoryItem
+} from "./services/storage.ts";
 
 type LayoutOption = "split" | "splitReverse" | "videoOnly" | "cameraOnly";
 
@@ -47,10 +53,19 @@ const seekMax = ref<number>(100);
 const isPlaying = ref<boolean>(false);
 const isSeeking = ref<boolean>(false);
 
+const historyItems = ref<HistoryItem[]>(
+  loadHistory().map((item) => ({
+    ...item,
+    thumbnailUrl: item.thumbnailUrl || makeThumbnailUrl(item.id)
+  }))
+);
+const historyOpen = ref(false);
+
 const DEFAULT_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 const rateOptions = ref<number[]>([...DEFAULT_RATES]);
 const SEEK_HOLD_MS = 1200;
 const SEEK_EPSILON = 0.8;
+const HISTORY_SYNC_MS = 2000;
 
 const cameraVideo = ref<HTMLVideoElement | null>(null);
 
@@ -62,6 +77,7 @@ let timeTimer: number | null = null;
 let cameraStream: MediaStream | null = null;
 let pendingSeekTo: number | null = null;
 let pendingSeekAt = 0;
+let lastHistorySyncAt = 0;
 
 function setStatus(target: Ref<string>, message = "") {
   target.value = message;
@@ -77,6 +93,108 @@ function formatTime(totalSeconds: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = Math.floor(totalSeconds % 60);
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+function formatDate(timestamp: number) {
+  if (!timestamp) return "--";
+  return new Date(timestamp).toLocaleString("ja-JP", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function makeThumbnailUrl(videoId: string) {
+  return `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+}
+
+function commitHistory(items: HistoryItem[]) {
+  const sorted = [...items].sort((a, b) => (b.lastPlayedAt || 0) - (a.lastPlayedAt || 0));
+  historyItems.value = sorted;
+  saveHistory(sorted);
+}
+
+function upsertHistoryEntry(update: Partial<HistoryItem> & { id: string }) {
+  const items = historyItems.value;
+  const index = items.findIndex((item) => item.id === update.id);
+  const existing = index >= 0 ? items[index] : null;
+
+  const titleCandidate = typeof update.title === "string" ? update.title.trim() : "";
+  const title = titleCandidate || existing?.title || "Unknown title";
+  const thumbnailUrl =
+    typeof update.thumbnailUrl === "string" && update.thumbnailUrl
+      ? update.thumbnailUrl
+      : existing?.thumbnailUrl || makeThumbnailUrl(update.id);
+  const channelTitle =
+    update.channelTitle !== undefined ? update.channelTitle : existing?.channelTitle;
+  const durationSec =
+    typeof update.durationSec === "number" ? update.durationSec : existing?.durationSec;
+  const lastPlayedAt =
+    typeof update.lastPlayedAt === "number"
+      ? update.lastPlayedAt
+      : existing?.lastPlayedAt ?? Date.now();
+  const lastPositionSec =
+    typeof update.lastPositionSec === "number"
+      ? update.lastPositionSec
+      : existing?.lastPositionSec ?? 0;
+
+  const merged: HistoryItem = {
+    id: update.id,
+    title,
+    thumbnailUrl,
+    channelTitle,
+    durationSec,
+    lastPlayedAt,
+    lastPositionSec
+  };
+
+  const next =
+    index >= 0 ? items.map((item, idx) => (idx === index ? merged : item)) : [merged, ...items];
+  commitHistory(next);
+}
+
+function touchHistory(videoId: string) {
+  upsertHistoryEntry({
+    id: videoId,
+    lastPlayedAt: Date.now(),
+    thumbnailUrl: makeThumbnailUrl(videoId)
+  });
+}
+
+function updateHistoryPosition(position: number) {
+  const activeId = getActiveVideoId();
+  if (!activeId) return;
+  const safePosition = Math.max(0, Math.floor(position));
+  upsertHistoryEntry({ id: activeId, lastPositionSec: safePosition });
+}
+
+function syncHistoryMetadata(videoId: string) {
+  if (!player || !playerReady) return;
+  const data = player.getVideoData ? player.getVideoData() : undefined;
+  const dataId = typeof data?.video_id === "string" ? data.video_id : "";
+  if (!dataId || dataId !== videoId) return;
+  const titleCandidate = typeof data?.title === "string" ? data.title.trim() : "";
+  const title = titleCandidate || "Unknown title";
+  const channelTitle = typeof data?.author === "string" ? data.author.trim() : undefined;
+  const duration = player.getDuration();
+  const durationSec = Number.isFinite(duration) && duration > 0 ? Math.floor(duration) : undefined;
+
+  upsertHistoryEntry({
+    id: videoId,
+    title,
+    channelTitle,
+    durationSec,
+    thumbnailUrl: makeThumbnailUrl(videoId)
+  });
+}
+
+function getActiveVideoId() {
+  if (!player || !playerReady) return state.videoId;
+  const data = player.getVideoData ? player.getVideoData() : undefined;
+  const dataId = typeof data?.video_id === "string" ? data.video_id : "";
+  return dataId || state.videoId;
 }
 
 function updateTimeLabel(current: number, duration: number) {
@@ -140,6 +258,14 @@ function updateTime() {
     const safeCurrent = Math.min(Math.floor(current), seekMax.value);
     seekValue.value = safeCurrent;
     updateTimeLabel(safeCurrent, durationSec || duration || 0);
+
+    if (isPlaying.value) {
+      const now = Date.now();
+      if (now - lastHistorySyncAt >= HISTORY_SYNC_MS) {
+        updateHistoryPosition(safeCurrent);
+        lastHistorySyncAt = now;
+      }
+    }
   }
 }
 
@@ -153,6 +279,8 @@ function handleLoad() {
 
   setStatus(ytStatus, "");
   persist({ videoId, lastInput: inputValue });
+  touchHistory(videoId);
+  syncHistoryMetadata(videoId);
 
   if (playerReady && player) {
     player.loadVideoById(videoId);
@@ -188,6 +316,38 @@ function handleSeekCommit() {
   pendingSeekTo = target;
   pendingSeekAt = Date.now();
   isSeeking.value = false;
+  updateHistoryPosition(target);
+  lastHistorySyncAt = Date.now();
+}
+
+function closeHistory() {
+  historyOpen.value = false;
+}
+
+function toggleHistory() {
+  historyOpen.value = !historyOpen.value;
+}
+
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    closeHistory();
+  }
+}
+
+function handleHistorySelect(item: HistoryItem) {
+  const inputValue = `https://youtu.be/${item.id}`;
+  ytUrl.value = inputValue;
+  handleLoad();
+  closeHistory();
+}
+
+function removeHistoryItem(id: string) {
+  const next = historyItems.value.filter((item) => item.id !== id);
+  commitHistory(next);
+}
+
+function clearHistory() {
+  commitHistory([]);
 }
 
 function onPlayerReady(_event: YouTubePlayerEvent, instance: YouTubePlayer) {
@@ -217,7 +377,33 @@ function onPlayerReady(_event: YouTubePlayerEvent, instance: YouTubePlayer) {
 function onPlayerStateChange(event: YouTubePlayerEvent) {
   const yt = window.YT;
   if (!yt) return;
+
   isPlaying.value = event.data === yt.PlayerState.PLAYING;
+
+  if (event.data === yt.PlayerState.PLAYING) {
+    const activeId = getActiveVideoId();
+    if (activeId) {
+      touchHistory(activeId);
+      syncHistoryMetadata(activeId);
+    }
+  }
+
+  if (event.data === yt.PlayerState.PAUSED || event.data === yt.PlayerState.ENDED) {
+    if (player) {
+      const current = player.getCurrentTime();
+      if (Number.isFinite(current)) {
+        updateHistoryPosition(current);
+        lastHistorySyncAt = Date.now();
+      }
+    }
+  }
+
+  if (event.data === yt.PlayerState.ENDED && player) {
+    const duration = player.getDuration();
+    if (Number.isFinite(duration) && duration > 0) {
+      updateHistoryPosition(duration);
+    }
+  }
 }
 
 function onPlayerError(_event: YouTubePlayerEvent) {
@@ -254,11 +440,13 @@ async function initPlayer() {
 onMounted(() => {
   initCamera();
   initPlayer();
+  window.addEventListener("keydown", handleKeydown);
 });
 
 onBeforeUnmount(() => {
   if (timeTimer) clearInterval(timeTimer);
   stopCamera(cameraStream);
+  window.removeEventListener("keydown", handleKeydown);
 });
 </script>
 
@@ -349,30 +537,93 @@ onBeforeUnmount(() => {
           <span>Mirror Camera</span>
         </label>
       </div>
+
+      <div class="control-row history-actions">
+        <button
+          class="btn"
+          type="button"
+          @click="toggleHistory"
+          :aria-expanded="historyOpen"
+          aria-controls="history-panel"
+        >
+          History
+        </button>
+      </div>
     </header>
 
-    <main class="stage" :data-layout="layout">
-      <section class="pane video-pane">
-        <div class="pane-header">
-          <span>Video</span>
-        </div>
-        <div id="yt-player" class="media"></div>
-      </section>
+    <main class="content">
+      <section class="stage" :data-layout="layout">
+        <section class="pane video-pane">
+          <div class="pane-header">
+            <span>Video</span>
+          </div>
+          <div id="yt-player" class="media"></div>
+        </section>
 
-      <section class="pane camera-pane">
-        <div class="pane-header">
-          <span>Camera</span>
-          <span class="status" :class="{ 'is-visible': cameraStatus }" aria-live="polite">{{ cameraStatus }}</span>
-        </div>
-        <video
-          ref="cameraVideo"
-          class="media"
-          :class="{ 'is-mirror': mirrorCamera }"
-          autoplay
-          playsinline
-          muted
-        ></video>
+        <section class="pane camera-pane">
+          <div class="pane-header">
+            <span>Camera</span>
+            <span class="status" :class="{ 'is-visible': cameraStatus }" aria-live="polite">{{ cameraStatus }}</span>
+          </div>
+          <video
+            ref="cameraVideo"
+            class="media"
+            :class="{ 'is-mirror': mirrorCamera }"
+            autoplay
+            playsinline
+            muted
+          ></video>
+        </section>
       </section>
     </main>
+
+    <div class="history-overlay" :class="{ 'is-open': historyOpen }" @click="closeHistory">
+      <aside id="history-panel" class="history-panel" @click.stop>
+        <div class="panel-header">
+          <span>History</span>
+          <button class="btn subtle" type="button" @click="closeHistory" aria-label="Close history panel">
+            Close
+          </button>
+        </div>
+        <div v-if="!historyItems.length" class="empty-state">No history yet.</div>
+        <ul v-else class="history-list">
+          <li v-for="item in historyItems" :key="item.id" class="history-item">
+            <button class="history-card" type="button" @click="handleHistorySelect(item)">
+              <img class="history-thumb" :src="item.thumbnailUrl" :alt="item.title || 'YouTube thumbnail'" />
+              <div class="history-meta">
+                <div class="history-title">{{ item.title || "Unknown title" }}</div>
+                <div class="history-sub">
+                  {{ formatTime(item.lastPositionSec) }} / {{ formatDate(item.lastPlayedAt) }}
+                </div>
+              </div>
+            </button>
+            <button class="btn icon" type="button" @click="removeHistoryItem(item.id)" aria-label="Remove">
+              x
+            </button>
+          </li>
+        </ul>
+        <div class="history-footer">
+          <button
+            class="btn icon trash"
+            type="button"
+            @click="clearHistory"
+            :disabled="!historyItems.length"
+            aria-label="Clear history"
+            title="Clear history"
+          >
+            <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M4 7h16M9 7V5h6v2m-8 0v12c0 1.1.9 2 2 2h6c1.1 0 2-.9 2-2V7"
+                fill="none"
+                stroke="currentColor"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                stroke-width="1.6"
+              />
+            </svg>
+          </button>
+        </div>
+      </aside>
+    </div>
   </div>
 </template>
