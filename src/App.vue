@@ -26,6 +26,7 @@ type AppState = {
   playbackRate: number;
   layout: LayoutOption;
   mirrorCamera: boolean;
+  mirrorVideo: boolean;
 };
 
 type SaveOptions = {
@@ -45,7 +46,8 @@ const DEFAULT_STATE: AppState = {
   lastInput: "",
   playbackRate: 1,
   layout: "split",
-  mirrorCamera: true
+  mirrorCamera: true,
+  mirrorVideo: false
 };
 
 const stored = loadState<AppState>();
@@ -54,6 +56,7 @@ const state: AppState = { ...DEFAULT_STATE, ...stored };
 const ytUrl = ref<string>(state.lastInput || state.videoId);
 const layout = ref<LayoutOption>(state.layout);
 const mirrorCamera = ref<boolean>(state.mirrorCamera);
+const mirrorVideo = ref<boolean>(state.mirrorVideo);
 const selectedRate = ref<number>(state.playbackRate);
 
 const ytStatus = ref<string>("");
@@ -71,6 +74,8 @@ const historyItems = ref<HistoryItem[]>(
   }))
 );
 const historyOpen = ref(false);
+const isFocusMode = ref(false);
+const showFocusExitButton = ref(false);
 const panelTab = ref<PanelTab>("history");
 
 const playlistState = loadPlaylists();
@@ -84,6 +89,7 @@ const rateOptions = ref<number[]>([...DEFAULT_RATES]);
 const SEEK_HOLD_MS = 1200;
 const SEEK_EPSILON = 0.8;
 const HISTORY_SYNC_MS = 2000;
+const FOCUS_EXIT_HIDE_DELAY_MS = 1600;
 
 const historyMap = computed(() => {
   const map = new Map<string, HistoryItem>();
@@ -98,6 +104,7 @@ const playlistItems = computed(() => activePlaylist.value?.items ?? []);
 const canAddCurrent = computed(() => Boolean(activePlaylist.value) && Boolean(getActiveVideoId()));
 
 const cameraVideo = ref<HTMLVideoElement | null>(null);
+const appRoot = ref<HTMLElement | null>(null);
 const dragState = ref<DragState | null>(null);
 
 let player: YouTubePlayer | null = null;
@@ -110,6 +117,8 @@ let pendingSeekTo: number | null = null;
 let pendingSeekAt = 0;
 let lastHistorySyncAt = 0;
 let dragHandleEl: HTMLElement | null = null;
+let focusExitTimer: number | null = null;
+let isUnmounted = false;
 
 function setStatus(target: Ref<string>, message = "") {
   target.value = message;
@@ -431,6 +440,10 @@ function updateMirror() {
   persist({ mirrorCamera: mirrorCamera.value });
 }
 
+function updateVideoMirror() {
+  persist({ mirrorVideo: mirrorVideo.value });
+}
+
 function setPlaybackRate(rate: number, options: SaveOptions = {}) {
   const numericRate = Number(rate);
   const safeRate = rateOptions.value.includes(numericRate) ? numericRate : 1;
@@ -546,11 +559,78 @@ function closeHistory() {
 }
 
 function toggleHistory() {
+  if (isFocusMode.value) return;
   historyOpen.value = !historyOpen.value;
+}
+
+function clearFocusExitTimer() {
+  if (!focusExitTimer) return;
+  clearTimeout(focusExitTimer);
+  focusExitTimer = null;
+}
+
+function showFocusExitButtonTemporarily() {
+  if (!isFocusMode.value) return;
+  showFocusExitButton.value = true;
+  clearFocusExitTimer();
+  focusExitTimer = window.setTimeout(() => {
+    showFocusExitButton.value = false;
+    focusExitTimer = null;
+  }, FOCUS_EXIT_HIDE_DELAY_MS);
+}
+
+async function enterFocusMode() {
+  closeHistory();
+  isFocusMode.value = true;
+  showFocusExitButtonTemporarily();
+
+  const root = appRoot.value;
+  if (!root || !document.fullscreenEnabled || document.fullscreenElement) return;
+  try {
+    await root.requestFullscreen();
+  } catch {
+    // Keep focus mode enabled even when native fullscreen is blocked.
+  }
+}
+
+async function exitFocusMode() {
+  clearFocusExitTimer();
+  isFocusMode.value = false;
+  showFocusExitButton.value = false;
+  if (!document.fullscreenElement) return;
+  try {
+    await document.exitFullscreen();
+  } catch {
+    // Ignore fullscreen exit errors.
+  }
+}
+
+function toggleFocusMode() {
+  if (isFocusMode.value) {
+    void exitFocusMode();
+  } else {
+    void enterFocusMode();
+  }
+}
+
+function handleFullscreenChange() {
+  if (!document.fullscreenElement) {
+    clearFocusExitTimer();
+    isFocusMode.value = false;
+    showFocusExitButton.value = false;
+  }
+}
+
+function handleFocusActivity() {
+  showFocusExitButtonTemporarily();
 }
 
 function handleKeydown(event: KeyboardEvent) {
   if (event.key === "Escape") {
+    if (isFocusMode.value) {
+      void exitFocusMode();
+      return;
+    }
     closeHistory();
   }
 }
@@ -569,6 +649,10 @@ function clearHistory() {
 }
 
 function onPlayerReady(_event: YouTubePlayerEvent, instance: YouTubePlayer) {
+  if (isUnmounted) {
+    return;
+  }
+
   player = instance;
   playerReady = true;
   setStatus(ytStatus, "");
@@ -630,11 +714,18 @@ function onPlayerError(_event: YouTubePlayerEvent) {
 }
 
 async function initCamera() {
-  if (!cameraVideo.value) return;
+  const videoEl = cameraVideo.value;
+  if (!videoEl || isUnmounted) return;
   try {
-    cameraStream = await startCamera(cameraVideo.value, { width: 1280, height: 720 });
+    const stream = await startCamera(videoEl, { width: 1280, height: 720 });
+    if (isUnmounted) {
+      stopCamera(stream);
+      return;
+    }
+    cameraStream = stream;
     setStatus(cameraStatus, "");
   } catch (error) {
+    if (isUnmounted) return;
     setStatus(cameraStatus, "Camera unavailable.");
     console.error("Camera error", error);
   }
@@ -656,22 +747,30 @@ async function initPlayer() {
 }
 
 onMounted(() => {
+  isUnmounted = false;
   initCamera();
   initPlayer();
   window.addEventListener("keydown", handleKeydown);
+  document.addEventListener("fullscreenchange", handleFullscreenChange);
 });
 
 onBeforeUnmount(() => {
+  isUnmounted = true;
   if (timeTimer) clearInterval(timeTimer);
+  clearFocusExitTimer();
   stopCamera(cameraStream);
   window.removeEventListener("keydown", handleKeydown);
+  document.removeEventListener("fullscreenchange", handleFullscreenChange);
   window.removeEventListener("pointermove", handleDragMove);
   window.removeEventListener("pointerup", handleDragEnd);
+  if (document.fullscreenElement === appRoot.value) {
+    void document.exitFullscreen();
+  }
 });
 </script>
 
 <template>
-  <div class="app">
+  <div ref="appRoot" class="app" :class="{ 'is-focus-mode': isFocusMode }">
     <header class="topbar">
       <div class="brand">
         <span class="brand-title">Dance Practice</span>
@@ -756,9 +855,16 @@ onBeforeUnmount(() => {
           <input type="checkbox" v-model="mirrorCamera" @change="updateMirror" />
           <span>Mirror Camera</span>
         </label>
+        <label class="toggle">
+          <input type="checkbox" v-model="mirrorVideo" @change="updateVideoMirror" />
+          <span>Mirror Video</span>
+        </label>
       </div>
 
       <div class="control-row history-actions">
+        <button class="btn subtle focus-toggle" type="button" @click="toggleFocusMode" aria-label="Focus view">
+          Focus View
+        </button>
         <button
           class="btn icon history-toggle"
           type="button"
@@ -782,13 +888,25 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <main class="content">
+    <main class="content" @pointermove="handleFocusActivity" @pointerdown="handleFocusActivity">
+      <button
+        v-if="isFocusMode"
+        class="btn subtle focus-exit"
+        :class="{ 'is-visible': showFocusExitButton }"
+        type="button"
+        @click="toggleFocusMode"
+        aria-label="Exit focus mode"
+      >
+        Close
+      </button>
       <section class="stage" :data-layout="layout">
         <section class="pane video-pane">
           <div class="pane-header">
             <span>Video</span>
           </div>
-          <div id="yt-player" class="media"></div>
+          <div class="media yt-shell" :class="{ 'is-mirror': mirrorVideo }">
+            <div id="yt-player" class="yt-host"></div>
+          </div>
         </section>
 
         <section class="pane camera-pane">
@@ -808,7 +926,7 @@ onBeforeUnmount(() => {
       </section>
     </main>
 
-    <div class="history-overlay" :class="{ 'is-open': historyOpen }" @click="closeHistory">
+    <div v-if="!isFocusMode" class="history-overlay" :class="{ 'is-open': historyOpen }" @click="closeHistory">
       <aside id="history-panel" class="history-panel" @click.stop>
         <div class="panel-header">
           <span>{{ panelTab === "history" ? "History" : "Playlists" }}</span>

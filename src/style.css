@@ -32,6 +32,14 @@ body {
   grid-template-rows: auto 1fr;
 }
 
+.app.is-focus-mode {
+  grid-template-rows: 1fr;
+}
+
+.app.is-focus-mode .topbar {
+  display: none;
+}
+
 .topbar {
   position: sticky;
   top: 0;
@@ -188,6 +196,11 @@ input[type="text"]:focus {
   height: 34px;
 }
 
+.focus-toggle {
+  height: 34px;
+  padding: 0 12px;
+}
+
 .history-footer .btn.icon {
   width: 34px;
   height: 34px;
@@ -246,10 +259,15 @@ input[type="text"]:focus {
 }
 
 .content {
+  position: relative;
   display: flex;
   flex-direction: column;
   padding: 16px;
   min-height: 0;
+}
+
+.app.is-focus-mode .content {
+  padding: 0;
 }
 
 .stage {
@@ -257,6 +275,10 @@ input[type="text"]:focus {
   display: flex;
   gap: 14px;
   min-height: 0;
+}
+
+.app.is-focus-mode .stage {
+  gap: 0;
 }
 
 .stage[data-layout="splitReverse"] {
@@ -283,6 +305,16 @@ input[type="text"]:focus {
   box-shadow: 0 16px 32px rgba(0, 0, 0, 0.35);
 }
 
+.app.is-focus-mode .pane {
+  border-radius: 0;
+  border: 0;
+  box-shadow: none;
+}
+
+.app.is-focus-mode .pane-header {
+  display: none;
+}
+
 .pane-header {
   display: flex;
   justify-content: space-between;
@@ -302,8 +334,9 @@ input[type="text"]:focus {
   background: #000;
 }
 
-#yt-player,
-#yt-player iframe,
+.yt-shell,
+.yt-shell #yt-player,
+.yt-shell iframe,
 video.media {
   width: 100%;
   height: 100%;
@@ -315,6 +348,28 @@ video.media {
 
 video.media.is-mirror {
   transform: scaleX(-1);
+}
+
+.yt-shell.is-mirror {
+  transform: scaleX(-1);
+  transform-origin: center;
+}
+
+.focus-exit {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 12;
+  background: rgba(10, 14, 20, 0.72);
+  border-color: rgba(255, 255, 255, 0.2);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.45s ease;
+}
+
+.focus-exit.is-visible {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .history-overlay {
