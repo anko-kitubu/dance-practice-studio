@@ -760,13 +760,24 @@ onBeforeUnmount(() => {
 
       <div class="control-row history-actions">
         <button
-          class="btn"
+          class="btn icon history-toggle"
           type="button"
           @click="toggleHistory"
           :aria-expanded="historyOpen"
           aria-controls="history-panel"
+          aria-label="History"
+          title="History"
         >
-          History
+          <svg class="icon-svg" viewBox="0 0 24 24" aria-hidden="true">
+            <path
+              d="M4 6h16M4 12h16M4 18h16"
+              fill="none"
+              stroke="currentColor"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              stroke-width="1.6"
+            />
+          </svg>
         </button>
       </div>
     </header>
@@ -878,7 +889,7 @@ onBeforeUnmount(() => {
         <div v-else class="playlist-view">
           <div class="playlist-header">
             <span>Playlists</span>
-            <button class="btn subtle" type="button" @click="createPlaylist">New</button>
+            <button class="btn subtle" type="button" @click="createPlaylist">＋</button>
           </div>
 
           <div v-if="!playlists.length" class="empty-state">No playlists yet.</div>

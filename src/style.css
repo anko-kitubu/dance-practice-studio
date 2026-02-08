@@ -183,6 +183,11 @@ input[type="text"]:focus {
   display: block;
 }
 
+.history-actions .btn.icon {
+  width: 34px;
+  height: 34px;
+}
+
 .history-footer .btn.icon {
   width: 34px;
   height: 34px;

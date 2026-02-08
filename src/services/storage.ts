@@ -89,18 +89,23 @@ export function loadPlaylists(): PlaylistState {
       return { playlists: [], activePlaylistId: null };
     }
     const parsed = JSON.parse(raw);
-    const playlistsRaw = Array.isArray(parsed?.playlists) ? parsed.playlists : [];
-    const playlists = playlistsRaw
-      .filter((item) => item && typeof item.id === "string" && typeof item.name === "string")
-      .map((item) => ({
-        id: item.id,
-        name: item.name,
-        createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now(),
-        updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : Date.now(),
-        items: Array.isArray(item.items)
-          ? item.items.filter((videoId) => typeof videoId === "string")
-          : []
-      }));
+    const playlistsRaw = Array.isArray(parsed?.playlists) ? (parsed.playlists as unknown[]) : [];
+    const playlists: Playlist[] = playlistsRaw
+      .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
+      .filter((item) => typeof item.id === "string" && typeof item.name === "string")
+      .map((item) => {
+        const itemsRaw = Array.isArray(item.items) ? item.items : [];
+        const items = itemsRaw.filter(
+          (videoId: unknown): videoId is string => typeof videoId === "string"
+        );
+        return {
+          id: item.id as string,
+          name: item.name as string,
+          createdAt: typeof item.createdAt === "number" ? item.createdAt : Date.now(),
+          updatedAt: typeof item.updatedAt === "number" ? item.updatedAt : Date.now(),
+          items
+        };
+      });
 
     const activeId = typeof parsed?.activePlaylistId === "string" ? parsed.activePlaylistId : null;
     const activePlaylistId = playlists.some((playlist) => playlist.id === activeId)
