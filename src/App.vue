@@ -120,15 +120,18 @@ let dragHandleEl: HTMLElement | null = null;
 let focusExitTimer: number | null = null;
 let isUnmounted = false;
 
+// ステータスメッセージの表示内容を更新する。
 function setStatus(target: Ref<string>, message = "") {
   target.value = message;
 }
 
+// アプリ状態の一部をメモリとストレージへ反映する。
 function persist(partial: Partial<AppState>) {
   Object.assign(state, partial);
   saveState<AppState>(partial);
 }
 
+// 秒数を mm:ss 形式に変換する。
 function formatTime(totalSeconds: number) {
   if (!Number.isFinite(totalSeconds) || totalSeconds < 0) return "0:00";
   const minutes = Math.floor(totalSeconds / 60);
@@ -136,6 +139,7 @@ function formatTime(totalSeconds: number) {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
+// UNIX時刻を日本語ロケールの表示文字列に変換する。
 function formatDate(timestamp: number) {
   if (!timestamp) return "--";
   return new Date(timestamp).toLocaleString("ja-JP", {
@@ -147,32 +151,39 @@ function formatDate(timestamp: number) {
   });
 }
 
+// 動画IDからYouTubeサムネイルURLを生成する。
 function makeThumbnailUrl(videoId: string) {
   return `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
 }
 
+// 履歴から対象動画のエントリを取得する。
 function getHistoryItem(videoId: string) {
   return historyMap.value.get(videoId);
 }
 
+// 履歴情報を優先して動画タイトルを返す。
 function getVideoTitle(videoId: string) {
   return getHistoryItem(videoId)?.title || videoId;
 }
 
+// 履歴情報を優先してサムネイルURLを返す。
 function getVideoThumbnail(videoId: string) {
   return getHistoryItem(videoId)?.thumbnailUrl || makeThumbnailUrl(videoId);
 }
 
+// 履歴情報を優先して前回再生位置を返す。
 function getVideoPosition(videoId: string) {
   return getHistoryItem(videoId)?.lastPositionSec ?? 0;
 }
 
+// 履歴を再生日時順に整列して保存する。
 function commitHistory(items: HistoryItem[]) {
   const sorted = [...items].sort((a, b) => (b.lastPlayedAt || 0) - (a.lastPlayedAt || 0));
   historyItems.value = sorted;
   saveHistory(sorted);
 }
 
+// 履歴1件をマージ更新し、存在しなければ追加する。
 function upsertHistoryEntry(update: Partial<HistoryItem> & { id: string }) {
   const items = historyItems.value;
   const index = items.findIndex((item) => item.id === update.id);
@@ -212,6 +223,7 @@ function upsertHistoryEntry(update: Partial<HistoryItem> & { id: string }) {
   commitHistory(next);
 }
 
+// 再生時刻だけを更新して履歴をアクティブ扱いにする。
 function touchHistory(videoId: string) {
   upsertHistoryEntry({
     id: videoId,
@@ -220,6 +232,7 @@ function touchHistory(videoId: string) {
   });
 }
 
+// 現在アクティブな動画の再生位置を履歴に保存する。
 function updateHistoryPosition(position: number) {
   const activeId = getActiveVideoId();
   if (!activeId) return;
@@ -227,6 +240,7 @@ function updateHistoryPosition(position: number) {
   upsertHistoryEntry({ id: activeId, lastPositionSec: safePosition });
 }
 
+// YouTubeプレイヤーから取得できるメタ情報を履歴へ同期する。
 function syncHistoryMetadata(videoId: string) {
   if (!player || !playerReady) return;
   const data = player.getVideoData ? player.getVideoData() : undefined;
@@ -247,6 +261,7 @@ function syncHistoryMetadata(videoId: string) {
   });
 }
 
+// プレイリストIDを生成する。
 function createPlaylistId() {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -254,6 +269,7 @@ function createPlaylistId() {
   return `pl-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+// プレイリスト一覧とアクティブ状態をまとめて保存する。
 function commitPlaylists(nextPlaylists: Playlist[], nextActiveId = activePlaylistId.value) {
   const activeId = nextActiveId ?? null;
   playlists.value = nextPlaylists;
@@ -261,11 +277,13 @@ function commitPlaylists(nextPlaylists: Playlist[], nextActiveId = activePlaylis
   savePlaylists({ playlists: nextPlaylists, activePlaylistId: activeId });
 }
 
+// 指定したプレイリストをアクティブに切り替える。
 function setActivePlaylist(playlistId: string) {
   if (playlistId === activePlaylistId.value) return;
   commitPlaylists(playlists.value, playlistId);
 }
 
+// 新規プレイリストを作成して選択状態にする。
 function createPlaylist() {
   const index = playlists.value.length + 1;
   const now = Date.now();
@@ -280,6 +298,7 @@ function createPlaylist() {
   panelTab.value = "playlists";
 }
 
+// プレイリスト名を入力ダイアログ経由で変更する。
 function renamePlaylist(playlist: Playlist) {
   const name = window.prompt("Playlist name", playlist.name);
   if (!name) return;
@@ -292,6 +311,7 @@ function renamePlaylist(playlist: Playlist) {
   commitPlaylists(next);
 }
 
+// プレイリストを削除し、必要なら次のプレイリストを選択する。
 function deletePlaylist(playlistId: string) {
   const target = playlists.value.find((item) => item.id === playlistId);
   if (!target) return;
@@ -303,6 +323,7 @@ function deletePlaylist(playlistId: string) {
   commitPlaylists(next, nextActive);
 }
 
+// 指定プレイリストの動画ID配列を置き換える。
 function updatePlaylistItems(playlistId: string, items: string[]) {
   const next = playlists.value.map((playlist) =>
     playlist.id === playlistId ? { ...playlist, items, updatedAt: Date.now() } : playlist
@@ -310,6 +331,7 @@ function updatePlaylistItems(playlistId: string, items: string[]) {
   commitPlaylists(next);
 }
 
+// 現在再生中の動画をアクティブプレイリストへ追加する。
 function addCurrentToPlaylist() {
   const playlist = activePlaylist.value;
   if (!playlist) return;
@@ -323,12 +345,14 @@ function addCurrentToPlaylist() {
   syncHistoryMetadata(activeId);
 }
 
+// 対象動画が現在のプレイリストへ追加可能か判定する。
 function canAddVideoToPlaylist(videoId: string) {
   const playlist = activePlaylist.value;
   if (!playlist) return false;
   return !playlist.items.includes(videoId);
 }
 
+// 追加ボタンに表示する補助テキストを返す。
 function getAddVideoTitle(videoId: string) {
   const playlist = activePlaylist.value;
   if (!playlist) return "Create playlist first";
@@ -336,6 +360,7 @@ function getAddVideoTitle(videoId: string) {
   return "Add to playlist";
 }
 
+// 任意の動画をアクティブプレイリストへ追加する。
 function addVideoToPlaylist(videoId: string) {
   const playlist = activePlaylist.value;
   if (!playlist) return;
@@ -346,6 +371,7 @@ function addVideoToPlaylist(videoId: string) {
   syncHistoryMetadata(videoId);
 }
 
+// プレイリストから指定位置の動画を削除する。
 function removePlaylistItem(index: number) {
   const playlist = activePlaylist.value;
   if (!playlist) return;
@@ -353,6 +379,7 @@ function removePlaylistItem(index: number) {
   updatePlaylistItems(playlist.id, nextItems);
 }
 
+// 動画IDからURL入力を組み立てて読み込みを実行する。
 function playFromVideoId(videoId: string) {
   const inputValue = `https://youtu.be/${videoId}`;
   ytUrl.value = inputValue;
@@ -360,10 +387,12 @@ function playFromVideoId(videoId: string) {
   closeHistory();
 }
 
+// プレイリスト項目クリック時の再生ハンドラ。
 function playFromPlaylist(videoId: string) {
   playFromVideoId(videoId);
 }
 
+// 並び替えドラッグを開始し、追跡リスナーを登録する。
 function startDrag(event: PointerEvent, index: number) {
   const playlist = activePlaylist.value;
   if (!playlist) return;
@@ -381,6 +410,7 @@ function startDrag(event: PointerEvent, index: number) {
   window.addEventListener("pointerup", handleDragEnd);
 }
 
+// ドラッグ中のポインタ位置から挿入候補インデックスを更新する。
 function handleDragMove(event: PointerEvent) {
   if (!dragState.value) return;
   const element = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
@@ -393,6 +423,7 @@ function handleDragMove(event: PointerEvent) {
   dragState.value = { ...dragState.value, overIndex: index };
 }
 
+// 並び替えドラッグを終了し、実際の順序変更を確定する。
 function handleDragEnd(event: PointerEvent) {
   if (!dragState.value) return;
   window.removeEventListener("pointermove", handleDragMove);
@@ -420,6 +451,7 @@ function handleDragEnd(event: PointerEvent) {
   updatePlaylistItems(playlist.id, nextItems);
 }
 
+// 再生中プレイヤーを基準に現在の動画IDを返す。
 function getActiveVideoId() {
   if (!player || !playerReady) return state.videoId;
   const data = player.getVideoData ? player.getVideoData() : undefined;
@@ -427,23 +459,28 @@ function getActiveVideoId() {
   return dataId || state.videoId;
 }
 
+// 現在時刻表示ラベルを更新する。
 function updateTimeLabel(current: number, duration: number) {
   timeLabel.value = `${formatTime(current)} / ${formatTime(duration)}`;
 }
 
+// レイアウト選択を反映して永続化する。
 function updateLayout(value: LayoutOption) {
   layout.value = value;
   persist({ layout: value });
 }
 
+// カメラの反転設定を永続化する。
 function updateMirror() {
   persist({ mirrorCamera: mirrorCamera.value });
 }
 
+// YouTube表示の反転設定を永続化する。
 function updateVideoMirror() {
   persist({ mirrorVideo: mirrorVideo.value });
 }
 
+// 再生速度を安全な値で適用し、必要に応じて保存する。
 function setPlaybackRate(rate: number, options: SaveOptions = {}) {
   const numericRate = Number(rate);
   const safeRate = rateOptions.value.includes(numericRate) ? numericRate : 1;
@@ -460,6 +497,7 @@ function setPlaybackRate(rate: number, options: SaveOptions = {}) {
   }
 }
 
+// プレイヤー時刻をUIへ同期し、再生中は履歴位置も定期保存する。
 function updateTime() {
   if (!playerReady || !player) return;
 
@@ -503,6 +541,7 @@ function updateTime() {
   }
 }
 
+// 入力URL/IDを検証し、対象動画の読み込み要求を出す。
 function handleLoad() {
   const inputValue = ytUrl.value.trim();
   const videoId = extractVideoId(inputValue);
@@ -523,6 +562,7 @@ function handleLoad() {
   }
 }
 
+// 再生状態を見て Play/Pause をトグルする。
 function togglePlay() {
   const yt = window.YT;
   if (!playerReady || !player || !yt) return;
@@ -534,14 +574,17 @@ function togglePlay() {
   }
 }
 
+// シーク操作開始時に自動同期を一時停止する。
 function handleSeekStart() {
   isSeeking.value = true;
 }
 
+// シーク中のつまみ位置で時刻ラベルを先行表示する。
 function handleSeekInput() {
   updateTimeLabel(seekValue.value, durationSec || 0);
 }
 
+// シーク確定時にプレイヤー移動と履歴更新を行う。
 function handleSeekCommit() {
   const target = seekValue.value;
   if (playerReady && player) {
@@ -554,21 +597,25 @@ function handleSeekCommit() {
   lastHistorySyncAt = Date.now();
 }
 
+// 履歴パネルを閉じる。
 function closeHistory() {
   historyOpen.value = false;
 }
 
+// 履歴パネルの開閉をトグルする。
 function toggleHistory() {
   if (isFocusMode.value) return;
   historyOpen.value = !historyOpen.value;
 }
 
+// フォーカス終了ボタンの非表示タイマーを停止する。
 function clearFocusExitTimer() {
   if (!focusExitTimer) return;
   clearTimeout(focusExitTimer);
   focusExitTimer = null;
 }
 
+// フォーカス終了ボタンを一時表示し、一定時間後に隠す。
 function showFocusExitButtonTemporarily() {
   if (!isFocusMode.value) return;
   showFocusExitButton.value = true;
@@ -579,6 +626,7 @@ function showFocusExitButtonTemporarily() {
   }, FOCUS_EXIT_HIDE_DELAY_MS);
 }
 
+// UIを隠したフォーカスモードへ遷移する。
 async function enterFocusMode() {
   closeHistory();
   isFocusMode.value = true;
@@ -593,6 +641,7 @@ async function enterFocusMode() {
   }
 }
 
+// フォーカスモードを終了し、通常表示へ戻す。
 async function exitFocusMode() {
   clearFocusExitTimer();
   isFocusMode.value = false;
@@ -605,6 +654,7 @@ async function exitFocusMode() {
   }
 }
 
+// フォーカスモードのON/OFFを切り替える。
 function toggleFocusMode() {
   if (isFocusMode.value) {
     void exitFocusMode();
@@ -613,6 +663,7 @@ function toggleFocusMode() {
   }
 }
 
+// Fullscreen API の状態変化をUI状態へ同期する。
 function handleFullscreenChange() {
   if (!document.fullscreenElement) {
     clearFocusExitTimer();
@@ -621,10 +672,12 @@ function handleFullscreenChange() {
   }
 }
 
+// フォーカス中の操作を検知して終了ボタンを再表示する。
 function handleFocusActivity() {
   showFocusExitButtonTemporarily();
 }
 
+// グローバルキー入力を処理し、Escで優先的にフォーカス解除する。
 function handleKeydown(event: KeyboardEvent) {
   if (event.key === "Escape") {
     if (isFocusMode.value) {
@@ -635,19 +688,23 @@ function handleKeydown(event: KeyboardEvent) {
   }
 }
 
+// 履歴項目選択時に対象動画を再生する。
 function handleHistorySelect(item: HistoryItem) {
   playFromVideoId(item.id);
 }
 
+// 履歴から指定動画を1件削除する。
 function removeHistoryItem(id: string) {
   const next = historyItems.value.filter((item) => item.id !== id);
   commitHistory(next);
 }
 
+// 履歴全件をクリアする。
 function clearHistory() {
   commitHistory([]);
 }
 
+// YouTubeプレイヤー準備完了時の初期同期処理を行う。
 function onPlayerReady(_event: YouTubePlayerEvent, instance: YouTubePlayer) {
   if (isUnmounted) {
     return;
@@ -676,6 +733,7 @@ function onPlayerReady(_event: YouTubePlayerEvent, instance: YouTubePlayer) {
   updateTime();
 }
 
+// YouTubeプレイヤーの状態変化に応じてUIと履歴を更新する。
 function onPlayerStateChange(event: YouTubePlayerEvent) {
   const yt = window.YT;
   if (!yt) return;
@@ -708,11 +766,13 @@ function onPlayerStateChange(event: YouTubePlayerEvent) {
   }
 }
 
+// YouTubeプレイヤーエラー時の表示とログ出力を行う。
 function onPlayerError(_event: YouTubePlayerEvent) {
   setStatus(ytStatus, "Video failed to load.");
   console.error("YouTube error", _event);
 }
 
+// カメラストリームを初期化し、動画要素へ接続する。
 async function initCamera() {
   const videoEl = cameraVideo.value;
   if (!videoEl || isUnmounted) return;
@@ -731,6 +791,7 @@ async function initCamera() {
   }
 }
 
+// YouTubeプレイヤーを初期化し、イベントを接続する。
 async function initPlayer() {
   try {
     await createYouTubePlayer({
@@ -746,6 +807,7 @@ async function initPlayer() {
   }
 }
 
+// マウント時にカメラ/プレイヤー初期化とイベント登録を実行する。
 onMounted(() => {
   isUnmounted = false;
   initCamera();
@@ -754,6 +816,7 @@ onMounted(() => {
   document.addEventListener("fullscreenchange", handleFullscreenChange);
 });
 
+// アンマウント時にタイマー/イベント/メディアリソースを解放する。
 onBeforeUnmount(() => {
   isUnmounted = true;
   if (timeTimer) clearInterval(timeTimer);
