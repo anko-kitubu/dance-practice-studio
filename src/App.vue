@@ -1,5 +1,5 @@
 ﻿<script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, type Ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, type Ref } from "vue";
 import {
   createYouTubePlayer,
   extractVideoId,
@@ -18,7 +18,20 @@ import {
   type Playlist
 } from "./services/storage.ts";
 
-type LayoutOption = "split" | "splitReverse" | "videoOnly" | "cameraOnly";
+type LayoutOption =
+  | "split"
+  | "splitReverse"
+  | "cameraFloat"
+  | "videoFloat"
+  | "videoOnly"
+  | "cameraOnly";
+
+type FloatRect = {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+};
 
 type AppState = {
   videoId: string;
@@ -27,6 +40,7 @@ type AppState = {
   layout: LayoutOption;
   mirrorCamera: boolean;
   mirrorVideo: boolean;
+  floatRect: FloatRect;
 };
 
 type SaveOptions = {
@@ -41,17 +55,62 @@ type DragState = {
   overIndex: number;
 };
 
+type FloatDragState = {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  originX: number;
+  originY: number;
+};
+
+const DEFAULT_FLOAT_RECT: FloatRect = {
+  x: 24,
+  y: 24,
+  w: 360,
+  h: 220
+};
+
+function isLayoutOption(value: unknown): value is LayoutOption {
+  return (
+    value === "split" ||
+    value === "splitReverse" ||
+    value === "cameraFloat" ||
+    value === "videoFloat" ||
+    value === "videoOnly" ||
+    value === "cameraOnly"
+  );
+}
+
+function normalizeFloatRect(value: unknown): FloatRect {
+  if (!value || typeof value !== "object") {
+    return { ...DEFAULT_FLOAT_RECT };
+  }
+
+  const raw = value as Record<string, unknown>;
+  const x = typeof raw.x === "number" && Number.isFinite(raw.x) ? raw.x : DEFAULT_FLOAT_RECT.x;
+  const y = typeof raw.y === "number" && Number.isFinite(raw.y) ? raw.y : DEFAULT_FLOAT_RECT.y;
+  const w = typeof raw.w === "number" && Number.isFinite(raw.w) ? raw.w : DEFAULT_FLOAT_RECT.w;
+  const h = typeof raw.h === "number" && Number.isFinite(raw.h) ? raw.h : DEFAULT_FLOAT_RECT.h;
+  return { x, y, w, h };
+}
+
 const DEFAULT_STATE: AppState = {
   videoId: "FgGJ323GlUk",
   lastInput: "",
   playbackRate: 1,
   layout: "split",
   mirrorCamera: true,
-  mirrorVideo: false
+  mirrorVideo: false,
+  floatRect: { ...DEFAULT_FLOAT_RECT }
 };
 
 const stored = loadState<AppState>();
-const state: AppState = { ...DEFAULT_STATE, ...stored };
+const state: AppState = {
+  ...DEFAULT_STATE,
+  ...stored,
+  layout: isLayoutOption(stored.layout) ? stored.layout : DEFAULT_STATE.layout,
+  floatRect: normalizeFloatRect(stored.floatRect)
+};
 
 const ytUrl = ref<string>(state.lastInput || state.videoId);
 const layout = ref<LayoutOption>(state.layout);
@@ -66,6 +125,7 @@ const seekValue = ref<number>(0);
 const seekMax = ref<number>(100);
 const isPlaying = ref<boolean>(false);
 const isSeeking = ref<boolean>(false);
+const floatRect = ref<FloatRect>({ ...state.floatRect });
 
 const historyItems = ref<HistoryItem[]>(
   loadHistory().map((item) => ({
@@ -90,6 +150,9 @@ const SEEK_HOLD_MS = 1200;
 const SEEK_EPSILON = 0.8;
 const HISTORY_SYNC_MS = 2000;
 const FOCUS_EXIT_HIDE_DELAY_MS = 1600;
+const FLOAT_MARGIN = 12;
+const FLOAT_MIN_WIDTH = 220;
+const FLOAT_MIN_HEIGHT = 140;
 
 const historyMap = computed(() => {
   const map = new Map<string, HistoryItem>();
@@ -102,9 +165,17 @@ const activePlaylist = computed(() =>
 );
 const playlistItems = computed(() => activePlaylist.value?.items ?? []);
 const canAddCurrent = computed(() => Boolean(activePlaylist.value) && Boolean(getActiveVideoId()));
+const isFloatingLayout = computed(() => layout.value === "cameraFloat" || layout.value === "videoFloat");
+const floatingPaneStyle = computed(() => ({
+  left: `${floatRect.value.x}px`,
+  top: `${floatRect.value.y}px`,
+  width: `${floatRect.value.w}px`,
+  height: `${floatRect.value.h}px`
+}));
 
 const cameraVideo = ref<HTMLVideoElement | null>(null);
 const appRoot = ref<HTMLElement | null>(null);
+const stageElement = ref<HTMLElement | null>(null);
 const dragState = ref<DragState | null>(null);
 
 let player: YouTubePlayer | null = null;
@@ -117,6 +188,8 @@ let pendingSeekTo: number | null = null;
 let pendingSeekAt = 0;
 let lastHistorySyncAt = 0;
 let dragHandleEl: HTMLElement | null = null;
+let floatDragState: FloatDragState | null = null;
+let floatDragHandleEl: HTMLElement | null = null;
 let focusExitTimer: number | null = null;
 let isUnmounted = false;
 
@@ -149,6 +222,53 @@ function formatDate(timestamp: number) {
     hour: "2-digit",
     minute: "2-digit"
   });
+}
+
+// 値を最小値と最大値の範囲に収める。
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+// 現在のステージ表示領域サイズを取得する。
+function getStageSize() {
+  const element = stageElement.value;
+  if (element) {
+    const rect = element.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) {
+      return { width: rect.width, height: rect.height };
+    }
+  }
+  return { width: window.innerWidth, height: window.innerHeight };
+}
+
+// 小窓レイアウトかどうかを判定する。
+function isFloatingLayoutMode(value: LayoutOption) {
+  return value === "cameraFloat" || value === "videoFloat";
+}
+
+// 小窓の位置とサイズをステージ内に収まる値へ補正する。
+function clampFloatRect(rect: FloatRect) {
+  const { width, height } = getStageSize();
+  const minWidth = Math.min(FLOAT_MIN_WIDTH, Math.max(120, width - FLOAT_MARGIN * 2));
+  const minHeight = Math.min(FLOAT_MIN_HEIGHT, Math.max(90, height - FLOAT_MARGIN * 2));
+  const maxWidth = Math.max(minWidth, width - FLOAT_MARGIN * 2);
+  const maxHeight = Math.max(minHeight, height - FLOAT_MARGIN * 2);
+  const w = clamp(rect.w, minWidth, maxWidth);
+  const h = clamp(rect.h, minHeight, maxHeight);
+  const maxX = Math.max(FLOAT_MARGIN, width - w - FLOAT_MARGIN);
+  const maxY = Math.max(FLOAT_MARGIN, height - h - FLOAT_MARGIN);
+  const x = clamp(rect.x, FLOAT_MARGIN, maxX);
+  const y = clamp(rect.y, FLOAT_MARGIN, maxY);
+  return { x, y, w, h };
+}
+
+// 小窓位置を更新し、必要に応じて永続化する。
+function applyFloatRect(rect: FloatRect, options: SaveOptions = {}) {
+  const next = clampFloatRect(rect);
+  floatRect.value = next;
+  if (!options.skipSave) {
+    persist({ floatRect: next });
+  }
 }
 
 // 動画IDからYouTubeサムネイルURLを生成する。
@@ -451,6 +571,60 @@ function handleDragEnd(event: PointerEvent) {
   updatePlaylistItems(playlist.id, nextItems);
 }
 
+// 小窓のドラッグ移動を開始する。
+function startFloatDrag(event: PointerEvent) {
+  if (!isFloatingLayout.value) return;
+  if (event.button !== 0) return;
+  event.preventDefault();
+
+  floatDragHandleEl = event.currentTarget as HTMLElement;
+  floatDragHandleEl.setPointerCapture(event.pointerId);
+  floatDragState = {
+    pointerId: event.pointerId,
+    startX: event.clientX,
+    startY: event.clientY,
+    originX: floatRect.value.x,
+    originY: floatRect.value.y
+  };
+  window.addEventListener("pointermove", handleFloatDragMove);
+  window.addEventListener("pointerup", handleFloatDragEnd);
+  window.addEventListener("pointercancel", handleFloatDragEnd);
+}
+
+// 小窓ドラッグ中の座標を更新する。
+function handleFloatDragMove(event: PointerEvent) {
+  if (!floatDragState) return;
+  if (event.pointerId !== floatDragState.pointerId) return;
+  const dx = event.clientX - floatDragState.startX;
+  const dy = event.clientY - floatDragState.startY;
+  floatRect.value = clampFloatRect({
+    ...floatRect.value,
+    x: floatDragState.originX + dx,
+    y: floatDragState.originY + dy
+  });
+}
+
+// 小窓ドラッグを終了して位置を保存する。
+function handleFloatDragEnd(event: PointerEvent) {
+  if (!floatDragState) return;
+  if (event.pointerId !== floatDragState.pointerId) return;
+  window.removeEventListener("pointermove", handleFloatDragMove);
+  window.removeEventListener("pointerup", handleFloatDragEnd);
+  window.removeEventListener("pointercancel", handleFloatDragEnd);
+
+  if (floatDragHandleEl) {
+    try {
+      floatDragHandleEl.releasePointerCapture(event.pointerId);
+    } catch {
+      // Ignore release errors.
+    }
+    floatDragHandleEl = null;
+  }
+
+  floatDragState = null;
+  applyFloatRect(floatRect.value);
+}
+
 // 再生中プレイヤーを基準に現在の動画IDを返す。
 function getActiveVideoId() {
   if (!player || !playerReady) return state.videoId;
@@ -466,8 +640,24 @@ function updateTimeLabel(current: number, duration: number) {
 
 // レイアウト選択を反映して永続化する。
 function updateLayout(value: LayoutOption) {
+  if (!isFloatingLayoutMode(value) && floatDragState) {
+    window.removeEventListener("pointermove", handleFloatDragMove);
+    window.removeEventListener("pointerup", handleFloatDragEnd);
+    window.removeEventListener("pointercancel", handleFloatDragEnd);
+    floatDragState = null;
+    floatDragHandleEl = null;
+  }
   layout.value = value;
+  if (isFloatingLayoutMode(value)) {
+    applyFloatRect(floatRect.value, { skipSave: true });
+  }
   persist({ layout: value });
+}
+
+// 画面リサイズ時に小窓の表示領域を補正する。
+function handleWindowResize() {
+  if (!isFloatingLayout.value) return;
+  applyFloatRect(floatRect.value, { skipSave: true });
 }
 
 // カメラの反転設定を永続化する。
@@ -813,7 +1003,11 @@ onMounted(() => {
   initCamera();
   initPlayer();
   window.addEventListener("keydown", handleKeydown);
+  window.addEventListener("resize", handleWindowResize);
   document.addEventListener("fullscreenchange", handleFullscreenChange);
+  void nextTick(() => {
+    applyFloatRect(floatRect.value, { skipSave: true });
+  });
 });
 
 // アンマウント時にタイマー/イベント/メディアリソースを解放する。
@@ -823,9 +1017,15 @@ onBeforeUnmount(() => {
   clearFocusExitTimer();
   stopCamera(cameraStream);
   window.removeEventListener("keydown", handleKeydown);
+  window.removeEventListener("resize", handleWindowResize);
   document.removeEventListener("fullscreenchange", handleFullscreenChange);
   window.removeEventListener("pointermove", handleDragMove);
   window.removeEventListener("pointerup", handleDragEnd);
+  window.removeEventListener("pointermove", handleFloatDragMove);
+  window.removeEventListener("pointerup", handleFloatDragEnd);
+  window.removeEventListener("pointercancel", handleFloatDragEnd);
+  floatDragState = null;
+  floatDragHandleEl = null;
   if (document.fullscreenElement === appRoot.value) {
     void document.exitFullscreen();
   }
@@ -835,11 +1035,6 @@ onBeforeUnmount(() => {
 <template>
   <div ref="appRoot" class="app" :class="{ 'is-focus-mode': isFocusMode }">
     <header class="topbar">
-      <div class="brand">
-        <span class="brand-title">Dance Practice</span>
-        <span class="brand-sub">Split View</span>
-      </div>
-
       <div class="control-row">
         <label class="field">
           <span class="field-label">YouTube</span>
@@ -896,6 +1091,22 @@ onBeforeUnmount(() => {
             @click="updateLayout('splitReverse')"
           >
             Reverse
+          </button>
+          <button
+            class="btn segment"
+            :class="{ 'is-active': layout === 'cameraFloat' }"
+            type="button"
+            @click="updateLayout('cameraFloat')"
+          >
+            Cam Float
+          </button>
+          <button
+            class="btn segment"
+            :class="{ 'is-active': layout === 'videoFloat' }"
+            type="button"
+            @click="updateLayout('videoFloat')"
+          >
+            Vid Float
           </button>
           <button
             class="btn segment"
@@ -962,20 +1173,44 @@ onBeforeUnmount(() => {
       >
         Close
       </button>
-      <section class="stage" :data-layout="layout">
-        <section class="pane video-pane">
+      <section ref="stageElement" class="stage" :data-layout="layout">
+        <section
+          class="pane video-pane"
+          :class="{ 'is-floating': layout === 'videoFloat' }"
+          :style="layout === 'videoFloat' ? floatingPaneStyle : undefined"
+        >
           <div class="pane-header">
             <span>Video</span>
+            <button
+              v-if="layout === 'videoFloat'"
+              class="btn subtle float-drag-handle"
+              type="button"
+              @pointerdown="startFloatDrag"
+            >
+              Drag
+            </button>
           </div>
           <div class="media yt-shell" :class="{ 'is-mirror': mirrorVideo }">
             <div id="yt-player" class="yt-host"></div>
           </div>
         </section>
 
-        <section class="pane camera-pane">
+        <section
+          class="pane camera-pane"
+          :class="{ 'is-floating': layout === 'cameraFloat' }"
+          :style="layout === 'cameraFloat' ? floatingPaneStyle : undefined"
+        >
           <div class="pane-header">
             <span>Camera</span>
             <span class="status" :class="{ 'is-visible': cameraStatus }" aria-live="polite">{{ cameraStatus }}</span>
+            <button
+              v-if="layout === 'cameraFloat'"
+              class="btn subtle float-drag-handle"
+              type="button"
+              @pointerdown="startFloatDrag"
+            >
+              Drag
+            </button>
           </div>
           <video
             ref="cameraVideo"

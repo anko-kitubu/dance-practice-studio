@@ -54,25 +54,6 @@ body {
   backdrop-filter: blur(10px);
 }
 
-.brand {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 150px;
-}
-
-.brand-title {
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-
-.brand-sub {
-  font-size: 12px;
-  color: var(--muted);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
 .control-row {
   display: flex;
   align-items: center;
@@ -86,6 +67,10 @@ body {
 
 .control-row.layout {
   flex: 1 1 360px;
+}
+
+.control-row.layout .segmented {
+  flex-shrink: 0;
 }
 
 .field {
@@ -277,6 +262,12 @@ input[type="text"]:focus {
   min-height: 0;
 }
 
+.stage[data-layout="cameraFloat"],
+.stage[data-layout="videoFloat"] {
+  position: relative;
+  display: block;
+}
+
 .app.is-focus-mode .stage {
   gap: 0;
 }
@@ -293,6 +284,11 @@ input[type="text"]:focus {
   display: none;
 }
 
+.stage[data-layout="cameraFloat"] .video-pane,
+.stage[data-layout="videoFloat"] .camera-pane {
+  height: 100%;
+}
+
 .pane {
   flex: 1;
   min-width: 0;
@@ -303,6 +299,14 @@ input[type="text"]:focus {
   border-radius: 16px;
   overflow: hidden;
   box-shadow: 0 16px 32px rgba(0, 0, 0, 0.35);
+}
+
+.pane.is-floating {
+  position: absolute;
+  z-index: 6;
+  min-width: 140px;
+  min-height: 90px;
+  box-shadow: 0 18px 36px rgba(0, 0, 0, 0.45);
 }
 
 .app.is-focus-mode .pane {
@@ -319,6 +323,7 @@ input[type="text"]:focus {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 10px 14px;
   border-bottom: 1px solid var(--border);
   font-size: 11px;
@@ -326,6 +331,17 @@ input[type="text"]:focus {
   letter-spacing: 0.14em;
   color: var(--muted);
   background: rgba(0, 0, 0, 0.25);
+}
+
+.float-drag-handle {
+  cursor: grab;
+  padding: 3px 10px;
+  font-size: 11px;
+  touch-action: none;
+}
+
+.float-drag-handle:active {
+  cursor: grabbing;
 }
 
 .media {
