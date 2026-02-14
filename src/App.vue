@@ -1,5 +1,6 @@
 ﻿<script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, type Ref } from "vue";
+import WaveformCanvas from "./components/WaveformCanvas.vue";
 import {
   createYouTubePlayer,
   extractVideoId,
@@ -7,6 +8,7 @@ import {
   type YouTubePlayerEvent
 } from "./services/youtube.ts";
 import { startCamera, stopCamera } from "./services/camera.ts";
+import { useCameraMotionEnergy } from "./composables/useCameraMotionEnergy.ts";
 import {
   loadHistory,
   loadPlaylists,
@@ -26,6 +28,8 @@ type LayoutOption =
   | "videoOnly"
   | "cameraOnly";
 
+type WaveformMode = "pseudo";
+
 type FloatRect = {
   x: number;
   y: number;
@@ -41,6 +45,9 @@ type AppState = {
   mirrorCamera: boolean;
   mirrorVideo: boolean;
   floatRect: FloatRect;
+  waveformEnabled: boolean;
+  waveformSensitivity: number;
+  waveformMode: WaveformMode;
 };
 
 type SaveOptions = {
@@ -86,6 +93,18 @@ function isLayoutOption(value: unknown): value is LayoutOption {
   );
 }
 
+function isWaveformMode(value: unknown): value is WaveformMode {
+  return value === "pseudo";
+}
+
+function normalizeWaveformSensitivity(value: unknown): number {
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(numeric)) return 1;
+  if (numeric <= 0.75) return 0.5;
+  if (numeric >= 1.25) return 1.5;
+  return 1;
+}
+
 function normalizeFloatRect(value: unknown): FloatRect {
   if (!value || typeof value !== "object") {
     return { ...DEFAULT_FLOAT_RECT };
@@ -106,7 +125,10 @@ const DEFAULT_STATE: AppState = {
   layout: "split",
   mirrorCamera: true,
   mirrorVideo: false,
-  floatRect: { ...DEFAULT_FLOAT_RECT }
+  floatRect: { ...DEFAULT_FLOAT_RECT },
+  waveformEnabled: true,
+  waveformSensitivity: 1,
+  waveformMode: "pseudo"
 };
 
 const stored = loadState<AppState>();
@@ -114,7 +136,9 @@ const state: AppState = {
   ...DEFAULT_STATE,
   ...stored,
   layout: isLayoutOption(stored.layout) ? stored.layout : DEFAULT_STATE.layout,
-  floatRect: normalizeFloatRect(stored.floatRect)
+  floatRect: normalizeFloatRect(stored.floatRect),
+  waveformSensitivity: normalizeWaveformSensitivity(stored.waveformSensitivity),
+  waveformMode: isWaveformMode(stored.waveformMode) ? stored.waveformMode : DEFAULT_STATE.waveformMode
 };
 
 const ytUrl = ref<string>(state.lastInput || state.videoId);
@@ -122,6 +146,9 @@ const layout = ref<LayoutOption>(state.layout);
 const mirrorCamera = ref<boolean>(state.mirrorCamera);
 const mirrorVideo = ref<boolean>(state.mirrorVideo);
 const selectedRate = ref<number>(state.playbackRate);
+const waveformEnabled = ref<boolean>(state.waveformEnabled);
+const waveformSensitivity = ref<number>(state.waveformSensitivity);
+const waveformMode = ref<WaveformMode>(state.waveformMode);
 
 const ytStatus = ref<string>("");
 const cameraStatus = ref<string>("");
@@ -159,6 +186,7 @@ const FOCUS_EXIT_HIDE_DELAY_MS = 1600;
 const FLOAT_MARGIN = 12;
 const FLOAT_MIN_WIDTH = 220;
 const FLOAT_MIN_HEIGHT = 140;
+const WAVEFORM_SENSITIVITY_OPTIONS = [0.5, 1, 1.5] as const;
 
 const historyMap = computed(() => {
   const map = new Map<string, HistoryItem>();
@@ -178,6 +206,8 @@ const floatingPaneStyle = computed(() => ({
   width: `${floatRect.value.w}px`,
   height: `${floatRect.value.h}px`
 }));
+const motionTracker = useCameraMotionEnergy();
+const motionEnergy = computed(() => motionTracker.energyRef.value);
 
 const cameraVideo = ref<HTMLVideoElement | null>(null);
 const appRoot = ref<HTMLElement | null>(null);
@@ -737,6 +767,18 @@ function updateVideoMirror() {
   persist({ mirrorVideo: mirrorVideo.value });
 }
 
+// 疑似波形の表示ON/OFF設定を永続化する。
+function updateWaveformEnabled() {
+  persist({ waveformEnabled: waveformEnabled.value });
+}
+
+// 疑似波形の感度を安全値へ正規化して永続化する。
+function updateWaveformSensitivity() {
+  const safeValue = normalizeWaveformSensitivity(waveformSensitivity.value);
+  waveformSensitivity.value = safeValue;
+  persist({ waveformSensitivity: safeValue });
+}
+
 // 再生速度を安全な値で適用し、必要に応じて保存する。
 function setPlaybackRate(rate: number, options: SaveOptions = {}) {
   const numericRate = Number(rate);
@@ -1049,8 +1091,10 @@ async function initCamera() {
       return;
     }
     cameraStream = stream;
+    motionTracker.start(videoEl);
     setStatus(cameraStatus, "");
   } catch (error) {
+    motionTracker.stop();
     if (isUnmounted) return;
     setStatus(cameraStatus, "Camera unavailable.");
     console.error("Camera error", error);
@@ -1076,6 +1120,7 @@ async function initPlayer() {
 // マウント時にカメラ/プレイヤー初期化とイベント登録を実行する。
 onMounted(() => {
   isUnmounted = false;
+  persist({ waveformMode: waveformMode.value });
   initCamera();
   initPlayer();
   window.addEventListener("keydown", handleKeydown);
@@ -1095,6 +1140,7 @@ onBeforeUnmount(() => {
   clearFocusExitTimer();
   disposeMediaFrameObserver();
   stopCamera(cameraStream);
+  motionTracker.stop();
   window.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("resize", handleWindowResize);
   document.removeEventListener("fullscreenchange", handleFullscreenChange);
@@ -1214,6 +1260,26 @@ onBeforeUnmount(() => {
         </label>
       </div>
 
+      <div class="control-row waveform-actions">
+        <span class="field-label">Wave</span>
+        <label class="toggle">
+          <input type="checkbox" v-model="waveformEnabled" @change="updateWaveformEnabled" />
+          <span>Wave ON/OFF</span>
+        </label>
+        <label class="field wave-sensitivity">
+          <span class="field-label">Sensitivity</span>
+          <select class="select" v-model.number="waveformSensitivity" @change="updateWaveformSensitivity">
+            <option
+              v-for="level in WAVEFORM_SENSITIVITY_OPTIONS"
+              :key="level"
+              :value="level"
+            >
+              {{ level }}x
+            </option>
+          </select>
+        </label>
+      </div>
+
       <div class="control-row history-actions">
         <button class="btn subtle focus-toggle" type="button" @click="toggleFocusMode" aria-label="Focus view">
           Focus View
@@ -1308,6 +1374,16 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </section>
+      </section>
+      <section v-if="waveformEnabled && waveformMode === 'pseudo'" class="waveform-bar">
+        <WaveformCanvas
+          :enabled="waveformEnabled"
+          :is-playing="isPlaying"
+          :playback-rate="selectedRate"
+          :motion-energy="motionEnergy"
+          :sensitivity="waveformSensitivity"
+          :focus-mode="isFocusMode"
+        />
       </section>
     </main>
 

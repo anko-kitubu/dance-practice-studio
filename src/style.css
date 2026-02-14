@@ -69,6 +69,11 @@ body {
   flex: 1 1 360px;
 }
 
+.control-row.waveform-actions {
+  flex: 0 1 auto;
+  margin-left: auto;
+}
+
 .control-row.layout .segmented {
   flex-shrink: 0;
 }
@@ -248,6 +253,7 @@ input[type="text"]:focus {
   display: flex;
   flex-direction: column;
   padding: 16px;
+  gap: 12px;
   min-height: 0;
 }
 
@@ -260,6 +266,16 @@ input[type="text"]:focus {
   display: flex;
   gap: 14px;
   min-height: 0;
+}
+
+.waveform-bar {
+  flex: 0 0 128px;
+  min-height: 96px;
+}
+
+.app.is-focus-mode .waveform-bar {
+  flex-basis: 92px;
+  min-height: 72px;
 }
 
 .stage[data-layout="cameraFloat"],
@@ -701,8 +717,16 @@ video.media.is-mirror {
     position: static;
   }
 
+  .control-row.waveform-actions {
+    margin-left: 0;
+  }
+
   .stage {
     flex-direction: column;
+  }
+
+  .waveform-bar {
+    flex-basis: 104px;
   }
 
   input[type="text"] {

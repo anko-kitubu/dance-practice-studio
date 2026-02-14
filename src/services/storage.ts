@@ -32,7 +32,7 @@ export function loadState<T extends StoredState>(): Partial<T> {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object") {
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return parsed as Partial<T>;
     }
     return {};
