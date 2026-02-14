@@ -63,6 +63,11 @@ type FloatDragState = {
   originY: number;
 };
 
+type FrameStyle = {
+  width: string;
+  height: string;
+};
+
 const DEFAULT_FLOAT_RECT: FloatRect = {
   x: 24,
   y: 24,
@@ -146,6 +151,7 @@ const activePlaylistId = ref<string | null>(
 
 const DEFAULT_RATES = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2];
 const rateOptions = ref<number[]>([...DEFAULT_RATES]);
+const MEDIA_ASPECT_RATIO = 16 / 9;
 const SEEK_HOLD_MS = 1200;
 const SEEK_EPSILON = 0.8;
 const HISTORY_SYNC_MS = 2000;
@@ -176,6 +182,10 @@ const floatingPaneStyle = computed(() => ({
 const cameraVideo = ref<HTMLVideoElement | null>(null);
 const appRoot = ref<HTMLElement | null>(null);
 const stageElement = ref<HTMLElement | null>(null);
+const videoViewport = ref<HTMLElement | null>(null);
+const cameraViewport = ref<HTMLElement | null>(null);
+const videoFrameStyle = ref<FrameStyle>({ width: "100%", height: "100%" });
+const cameraFrameStyle = ref<FrameStyle>({ width: "100%", height: "100%" });
 const dragState = ref<DragState | null>(null);
 
 let player: YouTubePlayer | null = null;
@@ -190,6 +200,7 @@ let lastHistorySyncAt = 0;
 let dragHandleEl: HTMLElement | null = null;
 let floatDragState: FloatDragState | null = null;
 let floatDragHandleEl: HTMLElement | null = null;
+let mediaFrameResizeObserver: ResizeObserver | null = null;
 let focusExitTimer: number | null = null;
 let isUnmounted = false;
 
@@ -239,6 +250,33 @@ function getStageSize() {
     }
   }
   return { width: window.innerWidth, height: window.innerHeight };
+}
+
+// 指定領域に収まる固定アスペクト比フレームのサイズを計算する。
+function calcFrameStyle(viewport: HTMLElement | null): FrameStyle {
+  if (!viewport) return { width: "100%", height: "100%" };
+
+  const rect = viewport.getBoundingClientRect();
+  const maxWidth = Math.max(0, rect.width);
+  const maxHeight = Math.max(0, rect.height);
+  if (maxWidth === 0 || maxHeight === 0) {
+    return { width: "100%", height: "100%" };
+  }
+
+  const widthByHeight = maxHeight * MEDIA_ASPECT_RATIO;
+  const width = widthByHeight <= maxWidth ? widthByHeight : maxWidth;
+  const height = width / MEDIA_ASPECT_RATIO;
+
+  return {
+    width: `${Math.round(width)}px`,
+    height: `${Math.round(height)}px`
+  };
+}
+
+// 動画とカメラの表示フレームサイズを再計算する。
+function updateMediaFrameStyles() {
+  videoFrameStyle.value = calcFrameStyle(videoViewport.value);
+  cameraFrameStyle.value = calcFrameStyle(cameraViewport.value);
 }
 
 // 小窓レイアウトかどうかを判定する。
@@ -652,12 +690,41 @@ function updateLayout(value: LayoutOption) {
     applyFloatRect(floatRect.value, { skipSave: true });
   }
   persist({ layout: value });
+  void nextTick(() => {
+    updateMediaFrameStyles();
+  });
 }
 
 // 画面リサイズ時に小窓の表示領域を補正する。
 function handleWindowResize() {
-  if (!isFloatingLayout.value) return;
-  applyFloatRect(floatRect.value, { skipSave: true });
+  if (isFloatingLayout.value) {
+    applyFloatRect(floatRect.value, { skipSave: true });
+  }
+  updateMediaFrameStyles();
+}
+
+// 固定比率フレームの監視を開始する。
+function initMediaFrameObserver() {
+  if (typeof ResizeObserver === "undefined") return;
+  if (mediaFrameResizeObserver) {
+    mediaFrameResizeObserver.disconnect();
+  }
+  mediaFrameResizeObserver = new ResizeObserver(() => {
+    updateMediaFrameStyles();
+  });
+  if (videoViewport.value) {
+    mediaFrameResizeObserver.observe(videoViewport.value);
+  }
+  if (cameraViewport.value) {
+    mediaFrameResizeObserver.observe(cameraViewport.value);
+  }
+}
+
+// 固定比率フレームの監視を停止する。
+function disposeMediaFrameObserver() {
+  if (!mediaFrameResizeObserver) return;
+  mediaFrameResizeObserver.disconnect();
+  mediaFrameResizeObserver = null;
 }
 
 // カメラの反転設定を永続化する。
@@ -821,6 +888,9 @@ async function enterFocusMode() {
   closeHistory();
   isFocusMode.value = true;
   showFocusExitButtonTemporarily();
+  void nextTick(() => {
+    updateMediaFrameStyles();
+  });
 
   const root = appRoot.value;
   if (!root || !document.fullscreenEnabled || document.fullscreenElement) return;
@@ -836,6 +906,9 @@ async function exitFocusMode() {
   clearFocusExitTimer();
   isFocusMode.value = false;
   showFocusExitButton.value = false;
+  void nextTick(() => {
+    updateMediaFrameStyles();
+  });
   if (!document.fullscreenElement) return;
   try {
     await document.exitFullscreen();
@@ -860,6 +933,9 @@ function handleFullscreenChange() {
     isFocusMode.value = false;
     showFocusExitButton.value = false;
   }
+  void nextTick(() => {
+    updateMediaFrameStyles();
+  });
 }
 
 // フォーカス中の操作を検知して終了ボタンを再表示する。
@@ -1007,6 +1083,8 @@ onMounted(() => {
   document.addEventListener("fullscreenchange", handleFullscreenChange);
   void nextTick(() => {
     applyFloatRect(floatRect.value, { skipSave: true });
+    initMediaFrameObserver();
+    updateMediaFrameStyles();
   });
 });
 
@@ -1015,6 +1093,7 @@ onBeforeUnmount(() => {
   isUnmounted = true;
   if (timeTimer) clearInterval(timeTimer);
   clearFocusExitTimer();
+  disposeMediaFrameObserver();
   stopCamera(cameraStream);
   window.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("resize", handleWindowResize);
@@ -1190,8 +1269,12 @@ onBeforeUnmount(() => {
               Drag
             </button>
           </div>
-          <div class="media yt-shell" :class="{ 'is-mirror': mirrorVideo }">
-            <div id="yt-player" class="yt-host"></div>
+          <div ref="videoViewport" class="media-viewport">
+            <div class="media-frame" :style="videoFrameStyle">
+              <div class="media yt-shell" :class="{ 'is-mirror': mirrorVideo }">
+                <div id="yt-player" class="yt-host"></div>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -1212,14 +1295,18 @@ onBeforeUnmount(() => {
               Drag
             </button>
           </div>
-          <video
-            ref="cameraVideo"
-            class="media"
-            :class="{ 'is-mirror': mirrorCamera }"
-            autoplay
-            playsinline
-            muted
-          ></video>
+          <div ref="cameraViewport" class="media-viewport">
+            <div class="media-frame" :style="cameraFrameStyle">
+              <video
+                ref="cameraVideo"
+                class="media"
+                :class="{ 'is-mirror': mirrorCamera }"
+                autoplay
+                playsinline
+                muted
+              ></video>
+            </div>
+          </div>
         </section>
       </section>
     </main>
