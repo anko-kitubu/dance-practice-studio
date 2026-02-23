@@ -95,3 +95,6 @@ npm run typecheck
 - `仕様書.md`
 - `優先順位.md`
 - `dance練習ツール_要件定義（たたき台）.md`
+
+## ライセンス
+このプロジェクトは `MIT License` のもとで公開しています。詳細は `LICENSE` を参照してください。
