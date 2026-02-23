@@ -111,7 +111,7 @@ function normalizeFloatRect(value: unknown): FloatRect {
 }
 
 const DEFAULT_STATE: AppState = {
-  videoId: "FgGJ323GlUk",
+  videoId: "",
   lastInput: "",
   playbackRate: 1,
   layout: "split",
@@ -1113,7 +1113,7 @@ async function initPlayer() {
   try {
     await createYouTubePlayer({
       elementId: "yt-player",
-      videoId: state.videoId,
+      ...(state.videoId ? { videoId: state.videoId } : {}),
       onReady: onPlayerReady,
       onStateChange: onPlayerStateChange,
       onError: onPlayerError

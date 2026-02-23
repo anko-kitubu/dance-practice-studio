@@ -1,4 +1,4 @@
-﻿type YouTubePlayerState = {
+type YouTubePlayerState = {
   PLAYING: number;
   PAUSED: number;
   ENDED: number;
@@ -128,7 +128,7 @@ export function extractVideoId(input: string): string | null {
 
 type CreatePlayerOptions = {
   elementId: string;
-  videoId: string;
+  videoId?: string;
   onReady?: (event: YouTubePlayerEvent, player: YouTubePlayer) => void;
   onStateChange?: (event: YouTubePlayerEvent, player: YouTubePlayer) => void;
   onError?: (event: YouTubePlayerEvent, player: YouTubePlayer) => void;
@@ -144,8 +144,8 @@ export async function createYouTubePlayer({
   const yt = await loadYouTubeApi();
 
   return new Promise((resolve) => {
-    const player = new yt.Player(elementId, {
-      videoId,
+    const playerOptions: ConstructorParameters<YouTubeNamespace["Player"]>[1] = {
+      ...(videoId ? { videoId } : {}),
       playerVars: {
         rel: 0,
         modestbranding: 1,
@@ -166,6 +166,8 @@ export async function createYouTubePlayer({
           if (onError) onError(event, player);
         }
       }
-    });
+    };
+
+    const player = new yt.Player(elementId, playerOptions);
   });
 }
