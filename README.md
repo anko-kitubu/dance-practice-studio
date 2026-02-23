@@ -4,7 +4,7 @@ YouTubeのお手本動画と自分のカメラ映像を同時表示し、振り�
 カメラと動画の比率を一定に保つ設計により、場面によって表示領域が小さくなる課題があります。そこで画面自体を無理に拡大するのではなく、余白を活用する方針として波形・オーディオスペクトラム表示を取り入れています。
 
 ## 今すぐ試す
-- `https://anko-kitubu.github.io/dance-practice-studio/`
+- https://anko-kitubu.github.io/dance-practice-studio/
 
 アクセス直後はカメラ権限が必要です。埋め込み不可のYouTube動画は再生できない場合があります。
 
