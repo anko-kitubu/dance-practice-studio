@@ -7,7 +7,6 @@ type Props = {
   isPlaying: boolean;
   playbackRate: number;
   motionEnergy: number;
-  sensitivity: number;
   focusMode?: boolean;
 };
 
@@ -19,6 +18,10 @@ const canvasEl = ref<HTMLCanvasElement | null>(null);
 const pseudoWave = usePseudoWaveform();
 
 let renderRafId: number | null = null;
+const BAR_COUNT = 56;
+const BAR_GAP = 2;
+const MIN_HALF_HEIGHT = 1.2;
+const MAX_HALF_RATIO = 0.38;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -29,8 +32,7 @@ function syncWaveState() {
   pseudoWave.setState({
     playing: props.enabled && props.isPlaying,
     rate: props.playbackRate,
-    motion: props.enabled ? props.motionEnergy : 0,
-    sensitivity: props.sensitivity
+    motion: props.enabled ? props.motionEnergy : 0
   });
 }
 
@@ -54,19 +56,24 @@ function resizeCanvas() {
 // 中央の基準線を描画する。
 function drawBaseline(ctx: CanvasRenderingContext2D, width: number, midY: number) {
   ctx.lineWidth = 1;
-  ctx.strokeStyle = "rgba(154, 164, 178, 0.24)";
+  ctx.strokeStyle = "rgba(255, 255, 255, 0.2)";
   ctx.beginPath();
   ctx.moveTo(0, midY);
   ctx.lineTo(width, midY);
   ctx.stroke();
 }
 
-// 疑似波形を描画する。
-function drawWave(ctx: CanvasRenderingContext2D, width: number, height: number) {
-  const points = pseudoWave.getWavePoints(Math.max(48, Math.floor(width / 5)));
+// 中央固定の白発光スペクトラムバーを上下対称で描画する。
+function drawSpectrumBars(ctx: CanvasRenderingContext2D, width: number, height: number) {
+  const levels = pseudoWave.getBarLevels(BAR_COUNT);
   const motion = clamp(props.motionEnergy, 0, 1);
   const midY = height / 2;
-  const amplitudePx = height * (0.26 + motion * 0.18);
+  const totalGap = BAR_GAP * (BAR_COUNT - 1);
+  const slotWidth = Math.max(1, (width - totalGap) / BAR_COUNT);
+  const usedWidth = slotWidth * BAR_COUNT + totalGap;
+  const startX = (width - usedWidth) * 0.5;
+  const maxHalf = height * MAX_HALF_RATIO;
+  const baseLineWidth = Math.max(1.1, Math.min(2.6, slotWidth * 0.45));
 
   drawBaseline(ctx, width, midY);
 
@@ -74,24 +81,48 @@ function drawWave(ctx: CanvasRenderingContext2D, width: number, height: number) 
     return;
   }
 
-  ctx.beginPath();
-  points.forEach((value, index) => {
-    const x = points.length === 1 ? 0 : (index / (points.length - 1)) * width;
-    const y = midY - value * amplitudePx;
-    if (index === 0) {
-      ctx.moveTo(x, y);
-    } else {
-      ctx.lineTo(x, y);
-    }
-  });
+  type BarSegment = {
+    x: number;
+    top: number;
+    bottom: number;
+    alpha: number;
+  };
 
-  const glow = 10 + motion * 22;
-  ctx.shadowBlur = glow;
-  ctx.shadowColor = `rgba(225, 81, 59, ${0.38 + motion * 0.4})`;
-  ctx.lineWidth = 2 + motion * 2.4;
-  ctx.strokeStyle = `rgba(240, 106, 79, ${0.82 + motion * 0.14})`;
-  ctx.stroke();
+  const segments: BarSegment[] = [];
+  for (let index = 0; index < BAR_COUNT; index += 1) {
+    const level = clamp(levels[index] ?? 0, 0, 1);
+    const halfHeight = MIN_HALF_HEIGHT + level * maxHalf;
+    const x = startX + index * (slotWidth + BAR_GAP) + slotWidth * 0.5;
+    const alpha = 0.2 + level * 0.8;
+    segments.push({
+      x,
+      top: midY - halfHeight,
+      bottom: midY + halfHeight,
+      alpha
+    });
+  }
+
+  ctx.lineCap = "round";
+  ctx.shadowColor = "rgba(255, 255, 255, 0.95)";
+  ctx.shadowBlur = 12 + motion * 24;
+  for (const segment of segments) {
+    ctx.strokeStyle = `rgba(255, 255, 255, ${0.12 + segment.alpha * 0.36})`;
+    ctx.lineWidth = baseLineWidth + 2.6;
+    ctx.beginPath();
+    ctx.moveTo(segment.x, segment.top);
+    ctx.lineTo(segment.x, segment.bottom);
+    ctx.stroke();
+  }
+
   ctx.shadowBlur = 0;
+  for (const segment of segments) {
+    ctx.strokeStyle = `rgba(255, 255, 255, ${0.38 + segment.alpha * 0.56})`;
+    ctx.lineWidth = baseLineWidth;
+    ctx.beginPath();
+    ctx.moveTo(segment.x, segment.top);
+    ctx.lineTo(segment.x, segment.bottom);
+    ctx.stroke();
+  }
 }
 
 // 1フレーム分の背景と波形を再描画する。
@@ -108,17 +139,20 @@ function renderFrame() {
   const pixelRatio = window.devicePixelRatio || 1;
   const width = canvas.width / pixelRatio;
   const height = canvas.height / pixelRatio;
+  const midY = height * 0.5;
 
   ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
   ctx.clearRect(0, 0, width, height);
-
-  const gradient = ctx.createLinearGradient(0, 0, 0, height);
-  gradient.addColorStop(0, "rgba(14, 20, 28, 0.95)");
-  gradient.addColorStop(1, "rgba(8, 12, 18, 0.92)");
-  ctx.fillStyle = gradient;
+  ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, width, height);
 
-  drawWave(ctx, width, height);
+  const centerGlow = ctx.createRadialGradient(width * 0.5, midY, 0, width * 0.5, midY, height * 0.85);
+  centerGlow.addColorStop(0, "rgba(255, 255, 255, 0.06)");
+  centerGlow.addColorStop(1, "rgba(255, 255, 255, 0)");
+  ctx.fillStyle = centerGlow;
+  ctx.fillRect(0, 0, width, height);
+
+  drawSpectrumBars(ctx, width, height);
 }
 
 // 描画ループを継続実行する。
@@ -145,7 +179,7 @@ onBeforeUnmount(() => {
 });
 
 watch(
-  () => [props.enabled, props.isPlaying, props.playbackRate, props.motionEnergy, props.sensitivity],
+  () => [props.enabled, props.isPlaying, props.playbackRate, props.motionEnergy],
   () => {
     syncWaveState();
   },
@@ -156,7 +190,7 @@ watch(
 <template>
   <div class="waveform-shell" :class="{ 'is-focus': focusMode, 'is-disabled': !enabled }">
     <canvas ref="canvasEl" class="waveform-canvas"></canvas>
-    <span class="waveform-label">Pseudo Wave</span>
+    <span class="waveform-label">Pseudo Spectrum</span>
   </div>
 </template>
 
@@ -166,8 +200,9 @@ watch(
   width: 100%;
   height: 100%;
   border-radius: 14px;
-  border: 1px solid rgba(42, 52, 68, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   overflow: hidden;
+  background: #000;
 }
 
 .waveform-canvas {
@@ -178,12 +213,12 @@ watch(
 
 .waveform-label {
   position: absolute;
-  top: 8px;
-  left: 12px;
-  font-size: 10px;
-  letter-spacing: 0.14em;
+  right: 10px;
+  bottom: 6px;
+  font-size: 9px;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: rgba(154, 164, 178, 0.9);
+  color: rgba(255, 255, 255, 0.28);
   pointer-events: none;
 }
 
@@ -194,6 +229,6 @@ watch(
 }
 
 .waveform-shell.is-disabled .waveform-label {
-  opacity: 0.6;
+  opacity: 0.45;
 }
 </style>

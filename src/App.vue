@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, type Ref } from "vue";
 import WaveformCanvas from "./components/WaveformCanvas.vue";
 import {
@@ -46,7 +46,7 @@ type AppState = {
   mirrorVideo: boolean;
   floatRect: FloatRect;
   waveformEnabled: boolean;
-  waveformSensitivity: number;
+  motionTrackerEnabled: boolean;
   waveformMode: WaveformMode;
 };
 
@@ -97,14 +97,6 @@ function isWaveformMode(value: unknown): value is WaveformMode {
   return value === "pseudo";
 }
 
-function normalizeWaveformSensitivity(value: unknown): number {
-  const numeric = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(numeric)) return 1;
-  if (numeric <= 0.75) return 0.5;
-  if (numeric >= 1.25) return 1.5;
-  return 1;
-}
-
 function normalizeFloatRect(value: unknown): FloatRect {
   if (!value || typeof value !== "object") {
     return { ...DEFAULT_FLOAT_RECT };
@@ -127,7 +119,7 @@ const DEFAULT_STATE: AppState = {
   mirrorVideo: false,
   floatRect: { ...DEFAULT_FLOAT_RECT },
   waveformEnabled: true,
-  waveformSensitivity: 1,
+  motionTrackerEnabled: true,
   waveformMode: "pseudo"
 };
 
@@ -137,7 +129,7 @@ const state: AppState = {
   ...stored,
   layout: isLayoutOption(stored.layout) ? stored.layout : DEFAULT_STATE.layout,
   floatRect: normalizeFloatRect(stored.floatRect),
-  waveformSensitivity: normalizeWaveformSensitivity(stored.waveformSensitivity),
+  motionTrackerEnabled: typeof stored.motionTrackerEnabled === "boolean" ? stored.motionTrackerEnabled : DEFAULT_STATE.motionTrackerEnabled,
   waveformMode: isWaveformMode(stored.waveformMode) ? stored.waveformMode : DEFAULT_STATE.waveformMode
 };
 
@@ -147,7 +139,7 @@ const mirrorCamera = ref<boolean>(state.mirrorCamera);
 const mirrorVideo = ref<boolean>(state.mirrorVideo);
 const selectedRate = ref<number>(state.playbackRate);
 const waveformEnabled = ref<boolean>(state.waveformEnabled);
-const waveformSensitivity = ref<number>(state.waveformSensitivity);
+const motionTrackerEnabled = ref<boolean>(state.motionTrackerEnabled);
 const waveformMode = ref<WaveformMode>(state.waveformMode);
 
 const ytStatus = ref<string>("");
@@ -186,7 +178,6 @@ const FOCUS_EXIT_HIDE_DELAY_MS = 1600;
 const FLOAT_MARGIN = 12;
 const FLOAT_MIN_WIDTH = 220;
 const FLOAT_MIN_HEIGHT = 140;
-const WAVEFORM_SENSITIVITY_OPTIONS = [0.5, 1, 1.5] as const;
 
 const historyMap = computed(() => {
   const map = new Map<string, HistoryItem>();
@@ -207,7 +198,7 @@ const floatingPaneStyle = computed(() => ({
   height: `${floatRect.value.h}px`
 }));
 const motionTracker = useCameraMotionEnergy();
-const motionEnergy = computed(() => motionTracker.energyRef.value);
+const motionEnergy = computed(() => (motionTrackerEnabled.value ? motionTracker.energyRef.value : 0));
 
 const cameraVideo = ref<HTMLVideoElement | null>(null);
 const appRoot = ref<HTMLElement | null>(null);
@@ -283,14 +274,14 @@ function getStageSize() {
 }
 
 // 指定領域に収まる固定アスペクト比フレームのサイズを計算する。
-function calcFrameStyle(viewport: HTMLElement | null): FrameStyle {
-  if (!viewport) return { width: "100%", height: "100%" };
+function calcFrameStyle(viewport: HTMLElement | null, fallback: FrameStyle): FrameStyle {
+  if (!viewport) return fallback;
 
   const rect = viewport.getBoundingClientRect();
   const maxWidth = Math.max(0, rect.width);
   const maxHeight = Math.max(0, rect.height);
   if (maxWidth === 0 || maxHeight === 0) {
-    return { width: "100%", height: "100%" };
+    return fallback;
   }
 
   const widthByHeight = maxHeight * MEDIA_ASPECT_RATIO;
@@ -305,8 +296,18 @@ function calcFrameStyle(viewport: HTMLElement | null): FrameStyle {
 
 // 動画とカメラの表示フレームサイズを再計算する。
 function updateMediaFrameStyles() {
-  videoFrameStyle.value = calcFrameStyle(videoViewport.value);
-  cameraFrameStyle.value = calcFrameStyle(cameraViewport.value);
+  videoFrameStyle.value = calcFrameStyle(videoViewport.value, videoFrameStyle.value);
+  cameraFrameStyle.value = calcFrameStyle(cameraViewport.value, cameraFrameStyle.value);
+}
+
+// レイアウト変更直後の0サイズ計測を避けるため、次フレームでも再計算する。
+function scheduleMediaFrameStylesUpdate() {
+  void nextTick(() => {
+    updateMediaFrameStyles();
+    window.requestAnimationFrame(() => {
+      updateMediaFrameStyles();
+    });
+  });
 }
 
 // 小窓レイアウトかどうかを判定する。
@@ -720,9 +721,7 @@ function updateLayout(value: LayoutOption) {
     applyFloatRect(floatRect.value, { skipSave: true });
   }
   persist({ layout: value });
-  void nextTick(() => {
-    updateMediaFrameStyles();
-  });
+  scheduleMediaFrameStylesUpdate();
 }
 
 // 画面リサイズ時に小窓の表示領域を補正する。
@@ -757,6 +756,15 @@ function disposeMediaFrameObserver() {
   mediaFrameResizeObserver = null;
 }
 
+// 簡易モーショントラッカーの状態を現在のカメラ入力へ反映する。
+function applyMotionTrackerState(videoEl: HTMLVideoElement | null) {
+  if (!motionTrackerEnabled.value || !videoEl) {
+    motionTracker.stop();
+    return;
+  }
+  motionTracker.start(videoEl);
+}
+
 // カメラの反転設定を永続化する。
 function updateMirror() {
   persist({ mirrorCamera: mirrorCamera.value });
@@ -772,11 +780,10 @@ function updateWaveformEnabled() {
   persist({ waveformEnabled: waveformEnabled.value });
 }
 
-// 疑似波形の感度を安全値へ正規化して永続化する。
-function updateWaveformSensitivity() {
-  const safeValue = normalizeWaveformSensitivity(waveformSensitivity.value);
-  waveformSensitivity.value = safeValue;
-  persist({ waveformSensitivity: safeValue });
+// 簡易モーショントラッカーのON/OFF設定を永続化して即時反映する。
+function updateMotionTrackerEnabled() {
+  persist({ motionTrackerEnabled: motionTrackerEnabled.value });
+  applyMotionTrackerState(cameraVideo.value);
 }
 
 // 再生速度を安全な値で適用し、必要に応じて保存する。
@@ -1091,7 +1098,7 @@ async function initCamera() {
       return;
     }
     cameraStream = stream;
-    motionTracker.start(videoEl);
+    applyMotionTrackerState(videoEl);
     setStatus(cameraStatus, "");
   } catch (error) {
     motionTracker.stop();
@@ -1266,17 +1273,9 @@ onBeforeUnmount(() => {
           <input type="checkbox" v-model="waveformEnabled" @change="updateWaveformEnabled" />
           <span>Wave ON/OFF</span>
         </label>
-        <label class="field wave-sensitivity">
-          <span class="field-label">Sensitivity</span>
-          <select class="select" v-model.number="waveformSensitivity" @change="updateWaveformSensitivity">
-            <option
-              v-for="level in WAVEFORM_SENSITIVITY_OPTIONS"
-              :key="level"
-              :value="level"
-            >
-              {{ level }}x
-            </option>
-          </select>
+        <label class="toggle">
+          <input type="checkbox" v-model="motionTrackerEnabled" @change="updateMotionTrackerEnabled" />
+          <span>Motion Tracker</span>
         </label>
       </div>
 
@@ -1381,7 +1380,6 @@ onBeforeUnmount(() => {
           :is-playing="isPlaying"
           :playback-rate="selectedRate"
           :motion-energy="motionEnergy"
-          :sensitivity="waveformSensitivity"
           :focus-mode="isFocusMode"
         />
       </section>
