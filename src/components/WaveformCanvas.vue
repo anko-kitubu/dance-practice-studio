@@ -18,6 +18,7 @@ const canvasEl = ref<HTMLCanvasElement | null>(null);
 const pseudoWave = usePseudoWaveform();
 
 let renderRafId: number | null = null;
+let renderLoopActive = false;
 const BAR_COUNT = 56;
 const BAR_GAP = 2;
 const MIN_HALF_HEIGHT = 1.2;
@@ -25,6 +26,10 @@ const MAX_HALF_RATIO = 0.38;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+function shouldAnimate() {
+  return props.enabled && props.isPlaying;
 }
 
 // propsから疑似波形生成ロジックへ入力値を同期する。
@@ -157,33 +162,70 @@ function renderFrame() {
 
 // 描画ループを継続実行する。
 function renderLoop() {
+  if (!renderLoopActive) {
+    renderRafId = null;
+    return;
+  }
   syncWaveState();
   renderFrame();
   renderRafId = window.requestAnimationFrame(renderLoop);
 }
 
-onMounted(() => {
-  resizeCanvas();
+function startRenderLoop() {
+  if (renderLoopActive) return;
+  renderLoopActive = true;
   pseudoWave.start();
   renderLoop();
-  window.addEventListener("resize", resizeCanvas);
-});
+}
 
-onBeforeUnmount(() => {
+function stopRenderLoop() {
+  renderLoopActive = false;
   if (renderRafId !== null) {
     window.cancelAnimationFrame(renderRafId);
     renderRafId = null;
   }
+}
+
+function stopWaveAnimation() {
+  stopRenderLoop();
   pseudoWave.stop();
-  window.removeEventListener("resize", resizeCanvas);
+}
+
+function updateAnimationState() {
+  syncWaveState();
+  if (shouldAnimate()) {
+    startRenderLoop();
+    return;
+  }
+  stopWaveAnimation();
+  renderFrame();
+}
+
+function handleResize() {
+  resizeCanvas();
+  renderFrame();
+}
+
+onMounted(() => {
+  resizeCanvas();
+  syncWaveState();
+  renderFrame();
+  if (shouldAnimate()) {
+    startRenderLoop();
+  }
+  window.addEventListener("resize", handleResize);
+});
+
+onBeforeUnmount(() => {
+  stopWaveAnimation();
+  window.removeEventListener("resize", handleResize);
 });
 
 watch(
-  () => [props.enabled, props.isPlaying, props.playbackRate, props.motionEnergy],
+  () => [props.enabled, props.isPlaying],
   () => {
-    syncWaveState();
-  },
-  { immediate: true }
+    updateAnimationState();
+  }
 );
 </script>
 

@@ -54,6 +54,11 @@ type SaveOptions = {
   skipSave?: boolean;
 };
 
+type HistoryCommitOptions = {
+  keepOrder?: boolean;
+  skipSave?: boolean;
+};
+
 type PanelTab = "history" | "playlists";
 
 type DragState = {
@@ -73,6 +78,11 @@ type FloatDragState = {
 type FrameStyle = {
   width: string;
   height: string;
+};
+
+type PendingResumeState = {
+  videoId: string;
+  position: number;
 };
 
 const DEFAULT_FLOAT_RECT: FloatRect = {
@@ -217,6 +227,8 @@ let timeTimer: number | null = null;
 let cameraStream: MediaStream | null = null;
 let pendingSeekTo: number | null = null;
 let pendingSeekAt = 0;
+let pendingResumeState: PendingResumeState | null = null;
+let historyDirty = false;
 let lastHistorySyncAt = 0;
 let dragHandleEl: HTMLElement | null = null;
 let floatDragState: FloatDragState | null = null;
@@ -366,14 +378,24 @@ function getVideoPosition(videoId: string) {
 }
 
 // 履歴を再生日時順に整列して保存する。
-function commitHistory(items: HistoryItem[]) {
-  const sorted = [...items].sort((a, b) => (b.lastPlayedAt || 0) - (a.lastPlayedAt || 0));
-  historyItems.value = sorted;
-  saveHistory(sorted);
+function commitHistory(items: HistoryItem[], options: HistoryCommitOptions = {}) {
+  const nextItems = options.keepOrder
+    ? [...items]
+    : [...items].sort((a, b) => (b.lastPlayedAt || 0) - (a.lastPlayedAt || 0));
+  historyItems.value = nextItems;
+  if (options.skipSave) {
+    historyDirty = true;
+    return;
+  }
+  saveHistory(nextItems);
+  historyDirty = false;
 }
 
 // 履歴1件をマージ更新し、存在しなければ追加する。
-function upsertHistoryEntry(update: Partial<HistoryItem> & { id: string }) {
+function upsertHistoryEntry(
+  update: Partial<HistoryItem> & { id: string },
+  options: HistoryCommitOptions = {}
+) {
   const items = historyItems.value;
   const index = items.findIndex((item) => item.id === update.id);
   const existing = index >= 0 ? items[index] : null;
@@ -409,7 +431,7 @@ function upsertHistoryEntry(update: Partial<HistoryItem> & { id: string }) {
 
   const next =
     index >= 0 ? items.map((item, idx) => (idx === index ? merged : item)) : [merged, ...items];
-  commitHistory(next);
+  commitHistory(next, options);
 }
 
 // 再生時刻だけを更新して履歴をアクティブ扱いにする。
@@ -422,14 +444,62 @@ function touchHistory(videoId: string) {
 }
 
 // 現在アクティブな動画の再生位置を履歴に保存する。
-function updateHistoryPosition(position: number) {
+function updateHistoryPosition(position: number, options: HistoryCommitOptions = {}) {
   const activeId = getActiveVideoId();
   if (!activeId) return;
   const safePosition = Math.max(0, Math.floor(position));
-  upsertHistoryEntry({ id: activeId, lastPositionSec: safePosition });
+  const items = historyItems.value;
+  const index = items.findIndex((item) => item.id === activeId);
+
+  if (index < 0) {
+    upsertHistoryEntry({ id: activeId, lastPositionSec: safePosition }, options);
+    return;
+  }
+
+  const existing = items[index];
+  if (existing.lastPositionSec === safePosition) {
+    if (!options.skipSave && historyDirty) {
+      saveHistory(historyItems.value);
+      historyDirty = false;
+    }
+    return;
+  }
+
+  const nextItems = [...items];
+  nextItems[index] = {
+    ...existing,
+    lastPositionSec: safePosition
+  };
+  commitHistory(nextItems, { ...options, keepOrder: true });
 }
 
 // YouTubeプレイヤーから取得できるメタ情報を履歴へ同期する。
+function scheduleResumePosition(videoId: string) {
+  const position = getVideoPosition(videoId);
+  pendingResumeState = position > 0 ? { videoId, position } : null;
+}
+
+function applyPendingResumePosition() {
+  if (!pendingResumeState || !player || !playerReady) return;
+
+  const activeId = getActiveVideoId();
+  if (activeId !== pendingResumeState.videoId) return;
+
+  const duration = player.getDuration();
+  if (!Number.isFinite(duration) || duration <= 0) return;
+
+  const safePosition = Math.max(0, pendingResumeState.position);
+  const target = safePosition >= duration ? Math.max(0, duration - 1) : safePosition;
+  pendingResumeState = null;
+  if (target <= 0) return;
+
+  player.seekTo(target, true);
+  pendingSeekTo = target;
+  pendingSeekAt = Date.now();
+  seekValue.value = Math.floor(target);
+  updateTimeLabel(target, durationSec || duration);
+}
+
 function syncHistoryMetadata(videoId: string) {
   if (!player || !playerReady) return;
   const data = player.getVideoData ? player.getVideoData() : undefined;
@@ -508,7 +578,11 @@ function deletePlaylist(playlistId: string) {
   if (!ok) return;
 
   const next = playlists.value.filter((item) => item.id !== playlistId);
-  const nextActive = next[0]?.id ?? null;
+  const currentActiveId = activePlaylistId.value;
+  const nextActive =
+    currentActiveId === playlistId
+      ? (next[0]?.id ?? null)
+      : (next.some((item) => item.id === currentActiveId) ? currentActiveId : (next[0]?.id ?? null));
   commitPlaylists(next, nextActive);
 }
 
@@ -597,6 +671,7 @@ function startDrag(event: PointerEvent, index: number) {
   };
   window.addEventListener("pointermove", handleDragMove);
   window.addEventListener("pointerup", handleDragEnd);
+  window.addEventListener("pointercancel", handleDragEnd);
 }
 
 // ドラッグ中のポインタ位置から挿入候補インデックスを更新する。
@@ -617,6 +692,7 @@ function handleDragEnd(event: PointerEvent) {
   if (!dragState.value) return;
   window.removeEventListener("pointermove", handleDragMove);
   window.removeEventListener("pointerup", handleDragEnd);
+  window.removeEventListener("pointercancel", handleDragEnd);
 
   if (dragHandleEl) {
     try {
@@ -816,6 +892,8 @@ function updateTime() {
     }
   }
 
+  applyPendingResumePosition();
+
   if (isSeeking.value) return;
 
   const current = player.getCurrentTime();
@@ -840,7 +918,7 @@ function updateTime() {
     if (isPlaying.value) {
       const now = Date.now();
       if (now - lastHistorySyncAt >= HISTORY_SYNC_MS) {
-        updateHistoryPosition(safeCurrent);
+        updateHistoryPosition(safeCurrent, { skipSave: true });
         lastHistorySyncAt = now;
       }
     }
@@ -860,6 +938,7 @@ function handleLoad() {
   persist({ videoId, lastInput: inputValue });
   touchHistory(videoId);
   syncHistoryMetadata(videoId);
+  scheduleResumePosition(videoId);
 
   if (playerReady && player) {
     player.loadVideoById(videoId);
@@ -893,6 +972,7 @@ function handleSeekInput() {
 // シーク確定時にプレイヤー移動と履歴更新を行う。
 function handleSeekCommit() {
   const target = seekValue.value;
+  pendingResumeState = null;
   if (playerReady && player) {
     player.seekTo(target, true);
   }
@@ -1020,6 +1100,34 @@ function clearHistory() {
 }
 
 // YouTubeプレイヤー準備完了時の初期同期処理を行う。
+function flushCurrentHistoryPosition() {
+  if (!playerReady || !player) {
+    if (historyDirty) {
+      saveHistory(historyItems.value);
+      historyDirty = false;
+    }
+    return;
+  }
+  const current = player.getCurrentTime();
+  if (!Number.isFinite(current)) {
+    if (historyDirty) {
+      saveHistory(historyItems.value);
+      historyDirty = false;
+    }
+    return;
+  }
+  updateHistoryPosition(current);
+  if (historyDirty) {
+    saveHistory(historyItems.value);
+    historyDirty = false;
+  }
+  lastHistorySyncAt = Date.now();
+}
+
+function handleBeforeUnload() {
+  flushCurrentHistoryPosition();
+}
+
 function onPlayerReady(_event: YouTubePlayerEvent, instance: YouTubePlayer) {
   if (isUnmounted) {
     return;
@@ -1037,6 +1145,11 @@ function onPlayerReady(_event: YouTubePlayerEvent, instance: YouTubePlayer) {
   }
 
   setPlaybackRate(state.playbackRate, { skipSave: true });
+
+  const startupVideoId = pendingVideoId ?? state.videoId;
+  if (startupVideoId) {
+    scheduleResumePosition(startupVideoId);
+  }
 
   if (pendingVideoId) {
     player.loadVideoById(pendingVideoId);
@@ -1130,6 +1243,7 @@ onMounted(() => {
   persist({ waveformMode: waveformMode.value });
   initCamera();
   initPlayer();
+  window.addEventListener("beforeunload", handleBeforeUnload);
   window.addEventListener("keydown", handleKeydown);
   window.addEventListener("resize", handleWindowResize);
   document.addEventListener("fullscreenchange", handleFullscreenChange);
@@ -1142,17 +1256,20 @@ onMounted(() => {
 
 // アンマウント時にタイマー/イベント/メディアリソースを解放する。
 onBeforeUnmount(() => {
+  flushCurrentHistoryPosition();
   isUnmounted = true;
   if (timeTimer) clearInterval(timeTimer);
   clearFocusExitTimer();
   disposeMediaFrameObserver();
   stopCamera(cameraStream);
   motionTracker.stop();
+  window.removeEventListener("beforeunload", handleBeforeUnload);
   window.removeEventListener("keydown", handleKeydown);
   window.removeEventListener("resize", handleWindowResize);
   document.removeEventListener("fullscreenchange", handleFullscreenChange);
   window.removeEventListener("pointermove", handleDragMove);
   window.removeEventListener("pointerup", handleDragEnd);
+  window.removeEventListener("pointercancel", handleDragEnd);
   window.removeEventListener("pointermove", handleFloatDragMove);
   window.removeEventListener("pointerup", handleFloatDragEnd);
   window.removeEventListener("pointercancel", handleFloatDragEnd);
