@@ -128,7 +128,7 @@ const DEFAULT_STATE: AppState = {
   mirrorCamera: true,
   mirrorVideo: false,
   floatRect: { ...DEFAULT_FLOAT_RECT },
-  waveformEnabled: true,
+  waveformEnabled: false,
   motionTrackerEnabled: true,
   waveformMode: "pseudo"
 };
